@@ -31,6 +31,8 @@ export interface PlanImportOptions {
 }
 
 const LEVEL_MATCH_MM = 50;
+/** Group names a report note spells out before "and N more". */
+const GROUP_NAMES_SHOWN = 5;
 
 /** "2 walls", "1 air terminal", "1 floor or slab": the label's nouns counted (registry labels are mostly plural, some singular). */
 function plural(n: number, label: string): string {
@@ -68,10 +70,14 @@ function planInScope(source: ImportSource, opts: PlanImportOptions): IfcImportPl
   const notes = new Set<string>();
   const shared = new Map<string, BimElement | string>();
   const exists = (id: ElementId) => byId.has(id) || opts.model.elements[id] !== undefined;
+  /** Source ids a planned record says it came from (a product's, a group's). */
+  const sourced = new Set<string>();
   const push = (r: BimElement) => {
     if (exists(r.id)) throw new Error(`[bim-kernel/import] the planned id ${r.id} is already used; the import key must be unique per source`);
     records.push(r);
     byId.set(r.id, r);
+    const from = "provenance" in r ? r.provenance?.ifcGlobalId : undefined;
+    if (from) sourced.add(from);
   };
 
   // Levels: the file's storeys matched to Main's levels (by the storey they came from, then name, then height), new ones made.
@@ -185,6 +191,22 @@ function planInScope(source: ImportSource, opts: PlanImportOptions): IfcImportPl
   }
   for (const u of source.unreadable) stay(u.entity, null, entityWords(u.entity), u.reason, u.count);
 
+  // Groups a class takes that no record came from: one note per class, ahead of the per-product notes, so what the file grouped isn't lost silently.
+  const leftGroups = new Map<string, { label: string; names: string[] }>();
+  for (const group of source.groups) {
+    if (sourced.has(group.sourceId)) continue;
+    const cls = map.candidates(group)[0];
+    if (!cls) continue;
+    const left = leftGroups.get(cls.id) ?? { label: cls.label, names: [] };
+    left.names.push(group.name?.trim() || "unnamed");
+    leftGroups.set(cls.id, left);
+  }
+  const groupNotes = [...leftGroups.values()].map(({ label, names }) => {
+    const one = names.length === 1;
+    const shown = names.length > GROUP_NAMES_SHOWN ? [...names.slice(0, GROUP_NAMES_SHOWN), `${names.length - GROUP_NAMES_SHOWN} more`] : names;
+    return `${plural(names.length, label)} ${one ? "wasn't" : "weren't"} brought in (${list(shown)}); anything in ${one ? "it" : "them"} that converted came in on its own, so set ${one ? "it" : "them"} up again by hand`;
+  });
+
   const classes: ImportClassLine[] = [...lines.values()]
     .map((l) => ({ classId: l.classId, label: l.label, converted: l.converted, linked: [...l.linked].map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count) }))
     .sort((a, b) => b.converted - a.converted || a.label.localeCompare(b.label));
@@ -199,7 +221,7 @@ function planInScope(source: ImportSource, opts: PlanImportOptions): IfcImportPl
     stayLinked: linkedCount,
     levelsAdded,
     classes,
-    notes: [...notes],
+    notes: [...groupNotes, ...notes],
     summary,
   };
   return { records, converted, report };
