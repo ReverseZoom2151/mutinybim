@@ -1,6 +1,7 @@
 import { asElementId } from "../types";
 import { GLOBAL_PARTITION } from "../partition";
 import type { Beam, Column, Component, ElementId, Level, MepSystem, Opening, PartInstance, PartTypeElement, Room, RunDomain, RunSegment, RunSize, Slab, Wall } from "../types";
+import type { Ceiling } from "../ceilings/types";
 import { RUN_DOMAINS } from "../routing/types";
 import { connectorDomainOf, sizeFitsDomain } from "../routing/rules";
 import { activeServiceRegistry } from "../services/registry";
@@ -74,6 +75,21 @@ const slab: ImportRuleDef = {
     const prism = verticalPrism(p.geometry);
     if (!prism) return fail(p.geometry.unread ? `its shape is ${p.geometry.unread}` : "it isn't flat (sloped or shaped)");
     const record: Slab = { ...base(ctx, p, level), kind: "slab", outline: prism.outline.map(roundPlan), thickness: round(prism.top - prism.bottom) };
+    return { ok: true, records: [record] };
+  },
+};
+
+/** A flat ceiling from one footprint pushed straight up: its underside is the ceiling, at its height above the level. */
+const ceiling: ImportRuleDef = {
+  id: "kernel.ceiling",
+  label: "Flat ceilings",
+  forKinds: ["ceiling"],
+  convert(p, ctx) {
+    const level = needLevel(ctx, p);
+    if (typeof level === "string") return fail(level);
+    const prism = verticalPrism(p.geometry);
+    if (!prism) return fail(p.geometry.unread ? `its shape is ${p.geometry.unread}` : "it isn't flat (sloped or shaped)");
+    const record: Ceiling = { ...base(ctx, p, level), kind: "ceiling", levelId: level.id, outline: prism.outline.map(roundPlan), form: "flat", heightMm: round(prism.bottom - level.elevationMm) };
     return { ok: true, records: [record] };
   },
 };
@@ -342,7 +358,7 @@ const component: ImportRuleDef = {
   },
 };
 
-export const KERNEL_IMPORT_RULES: readonly ImportRuleDef[] = [wall, slab, room, column, beam, opening, runSegment, part, component];
+export const KERNEL_IMPORT_RULES: readonly ImportRuleDef[] = [wall, slab, ceiling, room, column, beam, opening, runSegment, part, component];
 
 /** An element id for imported records: `imp.<source>.<GlobalId>[.<suffix>]`, GlobalId's `$` as `-` (outside its alphabet, so ids stay distinct). */
 export function importElementId(sourceKey: string, sourceId: string, suffix?: string): ElementId {
