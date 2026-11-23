@@ -381,24 +381,35 @@ export function resolveLuminairePhotometrics(
   // Emergency mode resolution:
   // 1. Explicit electrical.emergency_mode ("none" | "battery_pack" | "generator_circuit" | "inverter")
   // 2. Explicit electrical.egress_fixture boolean
-  // 3. Legacy luminaire instance params (`emergency: true` or `emergency_mode: "unswitched" | "switched"`)
+  // 3. Control-wiring luminaire instance params (`emergency: true` or `emergency_mode: "unswitched" | "switched" | "none"`)
   // 4. Connected to an emergency / life-safety circuit or panel
+  const instancePackEm = part.values?.[PHOTOMETRIC_PARAM_KEYS.emergencyMode];
   const packEmModeRaw = readStr(part, def, PHOTOMETRIC_PARAM_KEYS.emergencyMode);
+  const instanceCtrlEm = part.values?.emergency_mode;
+  const ctrlEmModeRaw = readStr(part, def, "emergency_mode");
   const legacyEmFlag = readBool(part, def, "emergency");
   const egressFlag = readBool(part, def, PHOTOMETRIC_PARAM_KEYS.egressFixture);
   const onEmCircuit = emParts.has(part.id);
 
   let emergencyMode: EmergencyMode = "none";
-  if (packEmModeRaw === "battery_pack" || packEmModeRaw === "generator_circuit" || packEmModeRaw === "inverter" || packEmModeRaw === "none") {
+  if (packEmModeRaw === "battery_pack" || packEmModeRaw === "generator_circuit" || packEmModeRaw === "inverter") {
     emergencyMode = packEmModeRaw;
+  } else if (instancePackEm === "none") {
+    emergencyMode = "none";
+  } else if (instanceCtrlEm === "unswitched" || instanceCtrlEm === "switched") {
+    emergencyMode = onEmCircuit ? "generator_circuit" : "battery_pack";
+  } else if (instanceCtrlEm === "none" && part.values?.emergency === false) {
+    emergencyMode = "none";
+  } else if (packEmModeRaw === "none") {
+    emergencyMode = "none";
   } else if (onEmCircuit) {
     emergencyMode = "generator_circuit";
-  } else if (egressFlag === true || legacyEmFlag === true) {
+  } else if (egressFlag === true || legacyEmFlag === true || ctrlEmModeRaw === "unswitched" || ctrlEmModeRaw === "switched") {
     emergencyMode = "battery_pack";
   }
 
   // If explicitly marked `egress_fixture: true` while emergency_mode was omitted, default to battery_pack
-  if (emergencyMode === "none" && egressFlag === true) {
+  if (emergencyMode === "none" && egressFlag === true && instancePackEm !== "none") {
     emergencyMode = onEmCircuit ? "generator_circuit" : "battery_pack";
   }
 

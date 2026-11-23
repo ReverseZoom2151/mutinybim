@@ -257,6 +257,32 @@ export const electrical = {
       elementIds,
       values,
     });
+
+    // Keep control-wiring `emergency` / `emergency_mode` instance params in sync when declared on the part type
+    if (spec.emergencyMode !== undefined) {
+      const isEm = spec.emergencyMode !== "none";
+      const updates = onWorking(ctx, "electrical.setLuminaireIes:syncControl", (m) => {
+        const out: { id: string; values: Record<string, string | boolean> }[] = [];
+        for (const id of elementIds) {
+          const part = m.elements[id];
+          if (part?.kind !== "part") continue;
+          const pt = m.elements[part.typeId];
+          if (pt?.kind !== "part_type") continue;
+          const allowed = new Set(pt.definition.instanceParams.map((p) => p.name));
+          const syncVals: Record<string, string | boolean> = {};
+          if (allowed.has("emergency")) syncVals.emergency = isEm;
+          if (allowed.has("emergency_mode")) {
+            const cur = part.values.emergency_mode;
+            syncVals.emergency_mode = isEm ? (cur === "switched" ? "switched" : "unswitched") : "none";
+          }
+          if (Object.keys(syncVals).length > 0) out.push({ id, values: syncVals });
+        }
+        return out;
+      });
+      for (const u of updates) {
+        ctx.edit({ type: "set_parameters", id: u.id, scope: "instance", values: u.values });
+      }
+    }
   },
 
   /**

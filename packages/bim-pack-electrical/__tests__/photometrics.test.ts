@@ -1141,4 +1141,57 @@ describe("Photometrics materials, glazing, furniture, surfaces, 3D stairs & 3D s
       expect(parsed.maxCandela).toBeGreaterThan(10);
     }
   });
+
+  it("recomputes egress photometrics immediately when a luminaire is toggled between normal, unswitched EM, and switched UL 924 EM", () => {
+    const troffer = builtinPartType("builtin:troffer-2x4-led@1")!;
+    const base = runCmds(emptyModel("em-toggle-sync"), [
+      { type: "save_part_types", types: [{ typeId: troffer.id, definition: troffer.definition }] },
+      {
+        type: "add_architecture",
+        levelId: "L1",
+        walls: [
+          { wallId: "w1", start: { x: 0, y: 0 }, end: { x: 20 * FT, y: 0 }, thicknessMm: 150, heightMm: 3000 },
+          { wallId: "w2", start: { x: 20 * FT, y: 0 }, end: { x: 20 * FT, y: 8 * FT }, thicknessMm: 150, heightMm: 3000 },
+          { wallId: "w3", start: { x: 20 * FT, y: 8 * FT }, end: { x: 0, y: 8 * FT }, thicknessMm: 150, heightMm: 3000 },
+          { wallId: "w4", start: { x: 0, y: 8 * FT }, end: { x: 0, y: 0 }, thicknessMm: 150, heightMm: 3000 },
+        ],
+        rooms: [
+          {
+            roomId: "r-corr",
+            number: "100",
+            name: "Main Corridor",
+            outline: [
+              { x: 0, y: 0 },
+              { x: 20 * FT, y: 0 },
+              { x: 20 * FT, y: 8 * FT },
+              { x: 0, y: 8 * FT },
+            ],
+          },
+        ],
+        openings: [],
+        casework: [],
+      },
+      { type: "place_part", partId: "f1", typeId: troffer.id, levelId: "L1", position: { x: 10 * FT, y: 4 * FT }, offsetMm: 9 * FT, mark: "F1" },
+    ]);
+
+    // 1. Starts as normal fixture -> 0 egress fc
+    const before = evaluateEgressPhotometrics(base, { gridSpacingFt: 2 });
+    expect(before.paths[0]!.avgFc).toBe(0);
+
+    // 2. Switched EM (UL 924) via control params + synced electrical.emergency_mode -> lights up egress immediately
+    const asSwitchedEm = runCmds(base, [
+      { type: "set_parameters", id: "f1", scope: "instance", values: { emergency: true, emergency_mode: "switched" } },
+      { type: "set_element_values", elementIds: ["f1"], values: { "electrical.emergency_mode": "battery_pack", "electrical.egress_fixture": true } },
+    ]);
+    const duringEm = evaluateEgressPhotometrics(asSwitchedEm, { gridSpacingFt: 2 });
+    expect(duringEm.paths[0]!.avgFc).toBeGreaterThan(2);
+
+    // 3. Toggled back to Normal -> drops straight back to 0 egress fc
+    const backToNormal = runCmds(asSwitchedEm, [
+      { type: "set_parameters", id: "f1", scope: "instance", values: { emergency: false, emergency_mode: "none" } },
+      { type: "set_element_values", elementIds: ["f1"], values: { "electrical.emergency_mode": "none", "electrical.egress_fixture": false } },
+    ]);
+    const afterOff = evaluateEgressPhotometrics(backToNormal, { gridSpacingFt: 2 });
+    expect(afterOff.paths[0]!.avgFc).toBe(0);
+  });
 });

@@ -302,7 +302,7 @@ export function exportRadianceScene(
     }
   }
 
-  // 2. Floor & roof slabs
+  // 2. Floor & roof slabs (plus architectural roofs `architecture.roof`)
   let slabCount = 0;
   for (const slab of elementsOfKind(model.elements, "slab") as Iterable<Slab>) {
     if (slab.outline.length < 3) continue;
@@ -313,6 +313,25 @@ export function exportRadianceScene(
       mat,
       `slab_${slab.id}`,
       slab.outline.map((p) => [p.x, p.y, zTop] as const),
+    );
+  }
+  for (const el of Object.values(model.elements)) {
+    const raw = el as unknown as {
+      kind?: string;
+      id?: string;
+      levelId?: string;
+      outline?: readonly Vec2[];
+      baseOffsetMm?: number;
+    };
+    if (raw.kind !== "architecture.roof" || !Array.isArray(raw.outline) || raw.outline.length < 3) continue;
+    slabCount++;
+    const baseZ = (raw.levelId ? levels.get(raw.levelId) : undefined) ?? resolveBaseZ(el, levels, sortedLevels);
+    const zTop = baseZ + (typeof raw.baseOffsetMm === "number" ? raw.baseOffsetMm : 0);
+    const mat = registerMaterial(resolveElementMaterial(model, el) ?? null, "default_roof", 0.25);
+    geometryRad += emitPolygon(
+      mat,
+      `roof_${raw.id ?? el.id}`,
+      [...raw.outline].reverse().map((p) => [p.x, p.y, zTop] as const),
     );
   }
 

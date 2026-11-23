@@ -368,6 +368,46 @@ function buildOcclusionIndex(model: ModelState): OcclusionIndex {
       isCeiling: true,
     });
   }
+  // 4b. Architectural roofs (add-on element kind `architecture.roof`, flat or sloped)
+  for (const el of Object.values(model.elements)) {
+    const raw = el as unknown as {
+      kind?: string;
+      id?: string;
+      levelId?: string;
+      outline?: readonly Vec2[];
+      thicknessMm?: number;
+      baseOffsetMm?: number;
+      slope?: { directionDeg: number; rise: number };
+    };
+    if (raw.kind !== "architecture.roof" || !Array.isArray(raw.outline) || raw.outline.length < 3) continue;
+    const baseZ = (raw.levelId ? levels.get(raw.levelId) : undefined) ?? resolveElementBaseZ(el, levels, sortedLevels);
+    const zBase = baseZ + (typeof raw.baseOffsetMm === "number" ? raw.baseOffsetMm : 0);
+    const thick = typeof raw.thicknessMm === "number" && raw.thicknessMm > 10 ? raw.thicknessMm : 200;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const p of raw.outline) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    // For sloped shed/gable roofs, compute mean plane elevation above base so upward sky rays intersect accurately
+    const spanMm = Math.max(maxX - minX, maxY - minY);
+    const riseExtra = raw.slope && Number.isFinite(raw.slope.rise) ? Math.abs(raw.slope.rise) * spanMm * 0.35 : 0;
+    slabs.push({
+      id: raw.id ?? el.id,
+      zBottom: zBase - thick,
+      zTop: zBase + riseExtra + thick,
+      minX,
+      maxX,
+      minY,
+      maxY,
+      outline: raw.outline,
+      holes: [],
+    });
+  }
 
   // 5. Furniture, casework, kitchen counters & equipment oriented bounding boxes
   const { occluders: furniture } = extractPartPhotometrics(model);

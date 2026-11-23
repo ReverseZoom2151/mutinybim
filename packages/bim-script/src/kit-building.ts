@@ -874,6 +874,29 @@ export const equipment = {
         ...(spec.emergencyMode !== undefined ? { emergency: spec.emergencyMode !== "none", emergency_mode: spec.emergencyMode } : {}),
       });
       if (Object.keys(values).length > 0) ctx.edit({ type: "set_parameters", id, scope: "instance", values });
+      if (spec.emergencyMode !== undefined) {
+        const existingPackEm = onWorkingIfAny(ctx, (m) => {
+          const part = m.elements[id];
+          if (part?.kind !== "part") return undefined;
+          const pt = m.elements[part.typeId];
+          const typeVals = pt?.kind === "part_type" ? pt.definition.typeValues : undefined;
+          return part.values["electrical.emergency_mode"] ?? typeVals?.["electrical.emergency_mode"];
+        });
+        const photMode =
+          spec.emergencyMode === "none"
+            ? "none"
+            : existingPackEm === "generator_circuit" || existingPackEm === "inverter"
+              ? existingPackEm
+              : "battery_pack";
+        ctx.edit({
+          type: "set_element_values",
+          elementIds: [id],
+          values: {
+            "electrical.emergency_mode": photMode,
+            "electrical.egress_fixture": spec.emergencyMode !== "none",
+          },
+        });
+      }
     }
   },
 };
