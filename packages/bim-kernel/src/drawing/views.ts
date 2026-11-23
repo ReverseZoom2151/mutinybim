@@ -1281,7 +1281,7 @@ function drawPlan(
   }
   const bgParts = maskedRunOwners.size > 0 ? deferredParts.filter((dp) => isBackgroundPart(dp.el, top.get(dp.el.id), maxRunNear)) : [];
   const fgParts = maskedRunOwners.size > 0 ? deferredParts.filter((dp) => !isBackgroundPart(dp.el, top.get(dp.el.id), maxRunNear)) : deferredParts;
-  if (bgParts.length > 0) drawPartList(bgParts, { index, top });
+  const bgStart = bgParts.length > 0 ? drawPartList(bgParts, { index, top }) : -1;
   // Exact local 3D depth along curved/sloped flex runs so a drop collar below an overhead main never pokes above that main.
   const flexNearAt = (el: Extract<BimElement, { kind: "run_segment" }>, u: number, v: number): number => {
     const pts = flexPoints(el);
@@ -1332,9 +1332,9 @@ function drawPlan(
     const vis = splitHidden({ u: t.at.x - 0.5, v: t.at.y, near }, { u: t.at.x + 0.5, v: t.at.y, near }, index, () => near);
     if (vis.visible.length > 0) emitInline(t);
   }
-  const fgIdx = drawPartList(fgParts);
+  const fgStart = drawPartList(fgParts);
   emitRunLabels();
-  return fgIdx;
+  return bgStart >= 0 ? bgStart : fgStart;
 }
 
 /**

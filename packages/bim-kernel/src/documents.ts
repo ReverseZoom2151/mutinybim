@@ -203,6 +203,10 @@ export interface ViewProps extends ViewGraphicsHints {
 export const VIEW_HASH_MARKS_FEATURE = "views:hash_marks";
 /** Peers that store a view's "label repeated typicals once" switch (round 13; an older peer's strict schema refuses the field). */
 export const VIEW_TYP_LABELS_FEATURE = "views:typ_labels";
+/** Peers that store and draw pack-contributed spatial analysis overlays on plan views. */
+export const VIEW_ANALYSIS_OVERLAY_FEATURE = "views:analysis_overlay";
+/** Peers that store per-viewport north-arrow sheet offsets and accept offset-only `set_viewport_north_arrow` commands. */
+export const VIEWPORT_NORTH_ARROW_OFFSET_FEATURE = "documents:viewport_north_arrow_offset";
 
 /** A callout: a box or custom closed polygon around part of a plan, bound to the view that shows it enlarged; its head reads that view's number and sheet, live. */
 export interface CalloutSpec {

@@ -669,6 +669,8 @@ function drawSchematicFitting(
           const branchPt = add(p, scale(bd, sweepLen));
           const trunkPt = add(p, scale(md, sweepLen));
           line(branchPt, trunkPt, pen);
+          const bp = flatPorts[branchIdx] ? plan(flatPorts[branchIdx]!.position) : p;
+          if (Math.hypot(bp.x - p.x, bp.y - p.y) > 1) line(branchPt, bp, pen);
         }
       } else if (pa) {
         // Hosted combination wye on a continuous trunk: sweep 45° downstream into flow direction.

@@ -607,6 +607,20 @@ function deviceTypes(version: string): LibraryEntry[] {
       { kind: "polyline", points: [[0, 0], [1.8, 0], [1.56, 0.9], [0.9, 1.56], [0, 1.8]], closed: true, fill: "solid", pen: "thin", units: "paper" },
       { kind: "polyline", points: [[0, 0], [-1.8, 0], [-1.56, -0.9], [-0.9, -1.56], [0, -1.8]], closed: true, fill: "solid", pen: "thin", units: "paper" },
     ]),
+    light("builtin:linear-pendant-led@1", "Linear pendant, LED", "4 ft direct/indirect, 4200 lm", 36, 277, false, [4 * FT_MM, 4 * IN], [
+      { kind: "rect", center: [0, 0], size: [4 * FT_MM, 4 * IN], fill: "mask", pen: "medium", minPaperMm: 4 },
+      { kind: "line", from: [-2 * FT_MM, 0], to: [2 * FT_MM, 0], pen: "thin" },
+    ]),
+    light("builtin:exit-combo-wall-pack@1", "Exit / emergency combo, LED", "Dual head egress combo, 450 lm, battery", 4, 277, true, [16 * IN, 4 * IN], [
+      { kind: "rect", center: [0, 0], size: [4.2, 2.0], fill: "mask", pen: "medium", units: "paper" },
+      { kind: "circle", center: [-2.4, 0], radius: 0.7, fill: "solid", pen: "thin", units: "paper" },
+      { kind: "circle", center: [2.4, 0], radius: 0.7, fill: "solid", pen: "thin", units: "paper" },
+      { kind: "text", at: [0, 0], text: "EX", heightMm: 1.2, anchor: "middle", units: "paper" },
+    ]),
+    light("builtin:exterior-wall-pack-led@1", "Exterior wall pack, LED", "Full-cutoff egress sconce, 1800 lm", 15, 120, true, [10 * IN, 6 * IN], [
+      { kind: "rect", center: [0, 0], size: [3.2, 2.2], fill: "mask", pen: "medium", units: "paper" },
+      { kind: "rect", center: [-0.8, 0], size: [1.6, 2.2], fill: "solid", pen: "thin", units: "paper", when: { param: "emergency", truthy: true } },
+    ]),
   ];
 }
 

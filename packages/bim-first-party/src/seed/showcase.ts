@@ -541,6 +541,8 @@ function buildShowcase(modelId: string): ModelState {
   const swD = mustBuiltin("builtin:switch-dimmer@1");
   const occ = mustBuiltin("builtin:occupancy-sensor-ceiling@1");
   const exit = mustBuiltin("builtin:exit-sign-led@1");
+  const linearPendant = mustBuiltin("builtin:linear-pendant-led@1");
+  const exitCombo = mustBuiltin("builtin:exit-combo-wall-pack@1");
   const waterMeter = mustBuiltin("builtin:plumbing-water-meter@1");
   const rpz = mustBuiltin("builtin:plumbing-rpz@1");
   const expTank = mustBuiltin("builtin:plumbing-expansion-tank@1");
@@ -553,7 +555,7 @@ function buildShowcase(modelId: string): ModelState {
       type: "save_part_types",
       types: [
         ...SHOWCASE_PART_TYPES.map((t) => ({ typeId: t.id, definition: t.definition })),
-        ...[rg, eg, swb, hpnl, xfmr, lpnl, rec, gfci, quad, sw1, sw3, swD, occ, exit, waterMeter, rpz, expTank, floorCo, vtr, manhole].map((t) => ({
+        ...[rg, eg, swb, hpnl, xfmr, lpnl, rec, gfci, quad, sw1, sw3, swD, occ, exit, linearPendant, exitCombo, waterMeter, rpz, expTank, floorCo, vtr, manhole].map((t) => ({
           typeId: t.id,
           definition: t.definition,
         })),
@@ -1313,37 +1315,119 @@ function buildShowcase(modelId: string): ModelState {
     { type: "place_part", partId: "sw-c1", typeId: sw1.id, levelId: "L1", position: pt(0, 0), host: { kind: "wall_face", elementId: "w-l1-core", stationMm: Math.round(8.2 * FT), side: 1 }, offsetMm: Math.round(44 * IN), mark: "SW-C1", values: { switch_leg: "c", control_type: "line_voltage" } },
     { type: "place_part", partId: "sw-d1", typeId: sw1.id, levelId: "L1", position: pt(0, 0), host: { kind: "wall_face", elementId: "w-l1-core", stationMm: Math.round(15.0 * FT), side: 1 }, offsetMm: Math.round(44 * IN), mark: "PC-1", values: { switch_leg: "d", control_type: "low_voltage" } },
 
-    // ZERO-CLASH Coordinated Recessed LED Luminaires (277V from HP-1)
-    // Zone A — Reception & Break 103 architectural 2×3 downlight grid (clear of col-1, SD-3/4, RG-2!)
-    { type: "place_part", partId: "lt-1", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(21.0 * FT, 3.2 * FT), offsetMm: CEILING_Z, mark: "F1-1", values: { switch_leg: "a", control_type: "0-10v", type_mark: "F1" } },
-    { type: "place_part", partId: "lt-2", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(26.0 * FT, 3.2 * FT), offsetMm: CEILING_Z, mark: "F1-2", values: { switch_leg: "a", control_type: "0-10v", type_mark: "F1" } },
-    { type: "place_part", partId: "lt-3", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(31.0 * FT, 3.2 * FT), offsetMm: CEILING_Z, mark: "F1-3", values: { switch_leg: "a", control_type: "0-10v", emergency: true, emergency_mode: "switched", type_mark: "F1E" } },
-    { type: "place_part", partId: "lt-13", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(21.0 * FT, 17.2 * FT), offsetMm: CEILING_Z, mark: "F1-4", values: { switch_leg: "a", control_type: "0-10v", type_mark: "F1" } },
-    { type: "place_part", partId: "lt-14", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(26.0 * FT, 17.2 * FT), offsetMm: CEILING_Z, mark: "F1-5", values: { switch_leg: "a", control_type: "0-10v", emergency: true, emergency_mode: "switched", type_mark: "F1E" } },
-    { type: "place_part", partId: "lt-15", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(31.0 * FT, 17.2 * FT), offsetMm: CEILING_Z, mark: "F1-6", values: { switch_leg: "a", control_type: "0-10v", type_mark: "F1" } },
+    // ZERO-CLASH Coordinated Recessed LED Luminaires (277V from HP-1) — photometrically verified for IES normal & NFPA 101 egress!
+    // Zone A — Reception & Break 103 architectural downlight grid (clear of col-l1-1 (26,14), SD-3/4, RG-2!)
+    { type: "place_part", partId: "lt-1", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(20.5 * FT, 3.0 * FT), offsetMm: CEILING_Z, mark: "F1-1", values: { switch_leg: "a", control_type: "0-10v", type_mark: "F1" } },
+    { type: "place_part", partId: "lt-2", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(26.0 * FT, 3.0 * FT), offsetMm: CEILING_Z, mark: "F1-2", values: { switch_leg: "a", control_type: "0-10v", type_mark: "F1" } },
+    { type: "place_part", partId: "lt-3", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(31.5 * FT, 3.0 * FT), offsetMm: CEILING_Z, mark: "F1-3", values: { switch_leg: "a", control_type: "0-10v", emergency: true, emergency_mode: "switched", type_mark: "F1E" } },
+    { type: "place_part", partId: "lt-16", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(20.5 * FT, 10.5 * FT), offsetMm: CEILING_Z, mark: "F1-4", values: { switch_leg: "a", control_type: "0-10v", emergency: true, emergency_mode: "switched", type_mark: "F1E" } },
+    { type: "place_part", partId: "lt-17", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(32.0 * FT, 10.5 * FT), offsetMm: CEILING_Z, mark: "F1-5", values: { switch_leg: "a", control_type: "0-10v", type_mark: "F1" } },
+    { type: "place_part", partId: "lt-13", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(20.5 * FT, 17.5 * FT), offsetMm: CEILING_Z, mark: "F1-6", values: { switch_leg: "a", control_type: "0-10v", type_mark: "F1" } },
+    { type: "place_part", partId: "lt-14", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(26.0 * FT, 17.5 * FT), offsetMm: CEILING_Z, mark: "F1-7", values: { switch_leg: "a", control_type: "0-10v", emergency: true, emergency_mode: "switched", type_mark: "F1E" } },
+    { type: "place_part", partId: "lt-15", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(31.5 * FT, 17.5 * FT), offsetMm: CEILING_Z, mark: "F1-8", values: { switch_leg: "a", control_type: "0-10v", type_mark: "F1" } },
+    { type: "place_part", partId: "lt-18", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(20.5 * FT, 24.5 * FT), offsetMm: CEILING_Z, mark: "F1-9", values: { switch_leg: "a", control_type: "0-10v", emergency: true, emergency_mode: "unswitched", type_mark: "F1E" } },
+    { type: "place_part", partId: "lt-19", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(26.5 * FT, 24.5 * FT), offsetMm: CEILING_Z, mark: "F1-10", values: { switch_leg: "a", control_type: "0-10v", emergency: true, emergency_mode: "unswitched", type_mark: "F1E" } },
+    { type: "place_part", partId: "lt-20", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(31.5 * FT, 24.5 * FT), offsetMm: CEILING_Z, mark: "F1-11", values: { switch_leg: "a", control_type: "0-10v", type_mark: "F1" } },
+    // Suspended linear task pendants over 8'-6" Oak Kitchenette Counter (FDA/IES 50 fc food-prep) & Quartz Break Island (30+ fc)
+    { type: "place_part", partId: "lt-kit-1", typeId: linearPendant.id, levelId: "L1", position: pt(19.4 * FT, 13.0 * FT), offsetMm: Math.round(7.5 * FT), rotationDeg: 90, mark: "F3-5", values: { switch_leg: "a", control_type: "0-10v", type_mark: "F3" } },
+    { type: "place_part", partId: "lt-kit-2", typeId: linearPendant.id, levelId: "L1", position: pt(19.4 * FT, 17.0 * FT), offsetMm: Math.round(7.5 * FT), rotationDeg: 90, mark: "F3-6", values: { switch_leg: "a", control_type: "0-10v", type_mark: "F3" } },
+    { type: "place_part", partId: "lt-isl-1", typeId: linearPendant.id, levelId: "L1", position: pt(26.5 * FT, 9.5 * FT), offsetMm: Math.round(7.5 * FT), rotationDeg: 0, mark: "F3-7", values: { switch_leg: "a", control_type: "0-10v", type_mark: "F3" } },
 
-    // Zone B — Design Studio 104 symmetric 2×2 2×4 volumetric LED troffers seated DEAD-CENTER in exact 2'×4' ACT cloud tiles (origin 36', 2')!
+    // Zone B — Design Studio 104 2×4 volumetric LED troffers seated DEAD-CENTER in exact 2'×4' ACT cloud tiles (origin 36', 2')!
     { type: "place_part", partId: "lt-4", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L1", position: pt(38.0 * FT, 5.0 * FT), offsetMm: CEILING_Z, mark: "F2-1", values: { switch_leg: "b", control_type: "0-10v", emergency: true, emergency_mode: "unswitched", type_mark: "F2E" } },
     { type: "place_part", partId: "lt-5", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L1", position: pt(50.0 * FT, 5.0 * FT), offsetMm: CEILING_Z, mark: "F2-2", values: { switch_leg: "b", control_type: "0-10v", type_mark: "F2" } },
-    { type: "place_part", partId: "lt-6", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L1", position: pt(38.0 * FT, 17.0 * FT), offsetMm: CEILING_Z, mark: "F2-3", values: { switch_leg: "b", control_type: "0-10v", type_mark: "F2" } },
-    { type: "place_part", partId: "lt-7", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L1", position: pt(50.0 * FT, 17.0 * FT), offsetMm: CEILING_Z, mark: "F2-4", values: { switch_leg: "b", control_type: "0-10v", emergency: true, emergency_mode: "switched", type_mark: "F2E" } },
-    // Print / Plotter 105 centered troffer
-    { type: "place_part", partId: "lt-8", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L1", position: pt(51.5 * FT, 24.5 * FT), offsetMm: CEILING_Z, mark: "F2-5", values: { switch_leg: "b", control_type: "0-10v", type_mark: "F2" } },
+    { type: "place_part", partId: "lt-21", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L1", position: pt(42.0 * FT, 3.0 * FT), offsetMm: CEILING_Z, mark: "F2-3", values: { switch_leg: "b", control_type: "0-10v", type_mark: "F2" } },
+    { type: "place_part", partId: "lt-22", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L1", position: pt(50.0 * FT, 13.0 * FT), offsetMm: CEILING_Z, mark: "F2-4", values: { switch_leg: "b", control_type: "0-10v", type_mark: "F2" } },
+    { type: "place_part", partId: "lt-6", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L1", position: pt(38.0 * FT, 17.0 * FT), offsetMm: CEILING_Z, mark: "F2-5", values: { switch_leg: "b", control_type: "0-10v", type_mark: "F2" } },
+    { type: "place_part", partId: "lt-7", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L1", position: pt(50.0 * FT, 17.0 * FT), offsetMm: CEILING_Z, mark: "F2-6", values: { switch_leg: "b", control_type: "0-10v", emergency: true, emergency_mode: "switched", type_mark: "F2E" } },
+    { type: "place_part", partId: "lt-23", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L1", position: pt(46.0 * FT, 19.0 * FT), offsetMm: CEILING_Z, mark: "F2-7", values: { switch_leg: "b", control_type: "0-10v", type_mark: "F2" } },
+    { type: "place_part", partId: "lt-24", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L1", position: pt(40.5 * FT, 24.5 * FT), offsetMm: CEILING_Z, mark: "F2-8", values: { switch_leg: "b", control_type: "0-10v", type_mark: "F2" } },
+    // Print / Plotter 105 centered troffer (8'-6" ACT ceiling for task illuminance >= 20 fc)
+    { type: "place_part", partId: "lt-8", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L1", position: pt(51.5 * FT, 24.5 * FT), offsetMm: Math.round(8.5 * FT), mark: "F2-9", values: { switch_leg: "b", control_type: "0-10v", type_mark: "F2" } },
 
-    // Zone C — MEP Room 101 evenly spaced working-aisle troffers + Restroom 102 downlights
-    { type: "place_part", partId: "lt-9", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L1", position: pt(9.0 * FT, 7.0 * FT), offsetMm: Math.round(10.5 * FT), mark: "F2-6", values: { switch_leg: "c", control_type: "line_voltage", type_mark: "F2" } },
-    { type: "place_part", partId: "lt-10", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L1", position: pt(9.0 * FT, 14.0 * FT), offsetMm: Math.round(10.5 * FT), mark: "F2-7", values: { switch_leg: "c", control_type: "line_voltage", emergency: true, emergency_mode: "unswitched", type_mark: "F2E" } },
-    { type: "place_part", partId: "lt-11", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(6.5 * FT, 25.2 * FT), offsetMm: Math.round(9.0 * FT), mark: "F1-7", values: { switch_leg: "c", control_type: "line_voltage", type_mark: "F1" } },
-    { type: "place_part", partId: "lt-12", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(15.2 * FT, 25.2 * FT), offsetMm: Math.round(9.0 * FT), mark: "F1-8", values: { switch_leg: "c", control_type: "line_voltage", type_mark: "F1" } },
+    // Zone C — MEP Room 101 evenly spaced working-aisle troffers + Restroom 102 downlights (clear of EG-2 at 11.6, 25.2!)
+    { type: "place_part", partId: "lt-9", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L1", position: pt(9.0 * FT, 4.5 * FT), offsetMm: Math.round(10.5 * FT), mark: "F2-10", values: { switch_leg: "c", control_type: "line_voltage", type_mark: "F2" } },
+    { type: "place_part", partId: "lt-10", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L1", position: pt(9.0 * FT, 11.0 * FT), offsetMm: Math.round(10.5 * FT), mark: "F2-11", values: { switch_leg: "c", control_type: "line_voltage", emergency: true, emergency_mode: "unswitched", type_mark: "F2E" } },
+    { type: "place_part", partId: "lt-9b", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L1", position: pt(9.0 * FT, 17.5 * FT), offsetMm: Math.round(10.5 * FT), mark: "F2-12", values: { switch_leg: "c", control_type: "line_voltage", type_mark: "F2" } },
+    { type: "place_part", partId: "lt-11", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(3.5 * FT, 24.5 * FT), offsetMm: Math.round(9.0 * FT), mark: "F1-12", values: { switch_leg: "c", control_type: "line_voltage", type_mark: "F1" } },
+    { type: "place_part", partId: "lt-11b", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(7.5 * FT, 25.5 * FT), offsetMm: Math.round(9.0 * FT), mark: "F1-13", values: { switch_leg: "c", control_type: "line_voltage", type_mark: "F1" } },
+    { type: "place_part", partId: "lt-12b", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(14.8 * FT, 26.0 * FT), offsetMm: Math.round(9.0 * FT), mark: "F1-14", values: { switch_leg: "c", control_type: "line_voltage", type_mark: "F1" } },
+    { type: "place_part", partId: "lt-12", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L1", position: pt(16.6 * FT, 24.5 * FT), offsetMm: Math.round(9.0 * FT), mark: "F1-15", values: { switch_leg: "c", control_type: "line_voltage", type_mark: "F1" } },
 
-    // Emergency Exit Sign above Studio corridor door D104
+    // Level 2 — Conference 201 direct/indirect linear pendants, Restroom 202 downlights, Mezzanine Loft 203 troffers + Exit/EM Combo
+    { type: "place_part", partId: "lt-201", typeId: linearPendant.id, levelId: "L2", position: pt(5.5 * FT, 6.0 * FT), offsetMm: Math.round(8.5 * FT), mark: "F3-1", values: { switch_leg: "e", control_type: "0-10v", type_mark: "F3" } },
+    { type: "place_part", partId: "lt-202", typeId: linearPendant.id, levelId: "L2", position: pt(12.5 * FT, 6.0 * FT), offsetMm: Math.round(8.5 * FT), mark: "F3-2", values: { switch_leg: "e", control_type: "0-10v", type_mark: "F3" } },
+    { type: "place_part", partId: "lt-203", typeId: linearPendant.id, levelId: "L2", position: pt(5.5 * FT, 15.0 * FT), offsetMm: Math.round(8.5 * FT), mark: "F3-3", values: { switch_leg: "e", control_type: "0-10v", type_mark: "F3" } },
+    { type: "place_part", partId: "lt-204", typeId: linearPendant.id, levelId: "L2", position: pt(12.5 * FT, 15.0 * FT), offsetMm: Math.round(8.5 * FT), mark: "F3-4", values: { switch_leg: "e", control_type: "0-10v", type_mark: "F3" } },
+    { type: "place_part", partId: "lt-205", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L2", position: pt(3.5 * FT, 24.5 * FT), offsetMm: Math.round(9.0 * FT), mark: "F1-16", values: { switch_leg: "e", control_type: "line_voltage", type_mark: "F1" } },
+    { type: "place_part", partId: "lt-206", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L2", position: pt(8.0 * FT, 25.5 * FT), offsetMm: Math.round(9.0 * FT), mark: "F1-17", values: { switch_leg: "e", control_type: "line_voltage", type_mark: "F1" } },
+    { type: "place_part", partId: "lt-207", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L2", position: pt(14.8 * FT, 26.0 * FT), offsetMm: Math.round(9.0 * FT), mark: "F1-18", values: { switch_leg: "e", control_type: "line_voltage", type_mark: "F1" } },
+    { type: "place_part", partId: "lt-208", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L2", position: pt(16.6 * FT, 24.5 * FT), offsetMm: Math.round(9.0 * FT), mark: "F1-19", values: { switch_leg: "e", control_type: "line_voltage", type_mark: "F1" } },
+    { type: "place_part", partId: "lt-209", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L2", position: pt(22.0 * FT, 5.5 * FT), offsetMm: Math.round(9.5 * FT), mark: "F2-13", values: { switch_leg: "e", control_type: "0-10v", emergency: true, emergency_mode: "switched", type_mark: "F2E" } },
+    { type: "place_part", partId: "lt-210", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L2", position: pt(30.0 * FT, 5.5 * FT), offsetMm: Math.round(9.5 * FT), mark: "F2-14", values: { switch_leg: "e", control_type: "0-10v", type_mark: "F2" } },
+    { type: "place_part", partId: "lt-211", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L2", position: pt(22.0 * FT, 14.0 * FT), offsetMm: Math.round(9.5 * FT), mark: "F2-15", values: { switch_leg: "e", control_type: "0-10v", type_mark: "F2" } },
+    { type: "place_part", partId: "lt-212", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L2", position: pt(30.0 * FT, 14.0 * FT), offsetMm: Math.round(9.5 * FT), mark: "F2-16", values: { switch_leg: "e", control_type: "0-10v", emergency: true, emergency_mode: "unswitched", type_mark: "F2E" } },
+    { type: "place_part", partId: "lt-213", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L2", position: pt(22.0 * FT, 23.0 * FT), offsetMm: Math.round(9.5 * FT), mark: "F2-17", values: { switch_leg: "e", control_type: "0-10v", emergency: true, emergency_mode: "unswitched", type_mark: "F2E" } },
+    { type: "place_part", partId: "lt-214", typeId: SHOWCASE_TROFFER_2X4.id, levelId: "L2", position: pt(30.0 * FT, 23.0 * FT), offsetMm: Math.round(9.5 * FT), mark: "F2-18", values: { switch_leg: "e", control_type: "0-10v", type_mark: "F2" } },
+    // Dedicated L2 stairwell emergency downlight above U-stair mid-landing & upper flight (NFPA 101 3D tread compliance!)
+    { type: "place_part", partId: "lt-215", typeId: SHOWCASE_DOWNLIGHT_6.id, levelId: "L2", position: pt(33.0 * FT, 23.5 * FT), offsetMm: Math.round(9.5 * FT), mark: "F1-20", values: { switch_leg: "e", control_type: "0-10v", emergency: true, emergency_mode: "unswitched", type_mark: "F1E" } },
+
+    // Emergency Exit / Combo Units above Studio corridor door D104 & L2 Stair Head
     { type: "place_part", partId: "exit-1", typeId: exit.id, levelId: "L1", position: pt(34.5 * FT, 10.5 * FT), offsetMm: Math.round(8.5 * FT), mark: "EX-1", values: { emergency: true, emergency_mode: "unswitched", type_mark: "EX" } },
+    { type: "place_part", partId: "exit-2", typeId: exitCombo.id, levelId: "L1", position: pt(26.5 * FT, 26.8 * FT), offsetMm: Math.round(8.5 * FT), mark: "EX-2", values: { emergency: true, emergency_mode: "unswitched", type_mark: "EXC" } },
 
-    // Zone D — Exterior Architectural Dark-Bronze LED Wall Sconces (Lithonia WDGE2, Photocell/Timeclock!)
-    { type: "place_part", partId: "wp-1", typeId: SHOWCASE_EXTERIOR_SCONCE.id, levelId: "L1", position: pt(0, 0), host: { kind: "wall_face", elementId: "w-l1-s-west", stationMm: Math.round(4.5 * FT), side: -1 }, offsetMm: Math.round(8.0 * FT), mark: "WP-1", values: { switch_leg: "d", control_type: "low_voltage", emergency: true, emergency_mode: "switched", type_mark: "WP" } },
-    { type: "place_part", partId: "wp-2", typeId: SHOWCASE_EXTERIOR_SCONCE.id, levelId: "L1", position: pt(0, 0), host: { kind: "wall_face", elementId: "w-l1-n-main", stationMm: Math.round(7.0 * FT), side: 1 }, offsetMm: Math.round(8.0 * FT), mark: "WP-2", values: { switch_leg: "d", control_type: "low_voltage", emergency: true, emergency_mode: "switched", type_mark: "WP" } },
-    { type: "place_part", partId: "wp-3", typeId: SHOWCASE_EXTERIOR_SCONCE.id, levelId: "L1", position: pt(0, 0), host: { kind: "wall_face", elementId: "w-l1-e-solid", stationMm: Math.round(9.5 * FT), side: 1 }, offsetMm: Math.round(8.0 * FT), mark: "WP-3", values: { switch_leg: "d", control_type: "low_voltage", emergency: false, emergency_mode: "none", type_mark: "WP" } },
+    // Zone D — Exterior Architectural Dark-Bronze LED Wall Sconces (Lithonia WDGE2, Photocell/Timeclock + Exit Discharge EM!)
+    { type: "place_part", partId: "wp-1", typeId: SHOWCASE_EXTERIOR_SCONCE.id, levelId: "L1", position: pt(0, 0), host: { kind: "wall_face", elementId: "w-l1-s-west", stationMm: Math.round(6.5 * FT), side: -1 }, offsetMm: Math.round(8.0 * FT), mark: "WP-1", values: { switch_leg: "d", control_type: "low_voltage", emergency: true, emergency_mode: "switched", type_mark: "WP" } },
+    { type: "place_part", partId: "wp-2", typeId: SHOWCASE_EXTERIOR_SCONCE.id, levelId: "L1", position: pt(0, 0), host: { kind: "wall_face", elementId: "w-l1-n-main", stationMm: Math.round(4.0 * FT), side: 1 }, offsetMm: Math.round(8.0 * FT), mark: "WP-2", values: { switch_leg: "d", control_type: "low_voltage", emergency: true, emergency_mode: "switched", type_mark: "WP" } },
+    { type: "place_part", partId: "wp-3", typeId: SHOWCASE_EXTERIOR_SCONCE.id, levelId: "L1", position: pt(0, 0), host: { kind: "wall_face", elementId: "w-l1-e-solid", stationMm: Math.round(9.5 * FT), side: -1 }, offsetMm: Math.round(8.0 * FT), mark: "WP-3", values: { switch_leg: "d", control_type: "low_voltage", emergency: false, emergency_mode: "none", type_mark: "WP" } },
     { type: "place_part", partId: "wp-4", typeId: SHOWCASE_EXTERIOR_SCONCE.id, levelId: "L2", position: pt(0, 0), host: { kind: "wall_face", elementId: "w-l2-s-cedar", stationMm: Math.round(3.0 * FT), side: -1 }, offsetMm: Math.round(7.5 * FT), mark: "WP-4", values: { switch_leg: "d", control_type: "low_voltage", emergency: false, emergency_mode: "none", type_mark: "WP" } },
+
+    // Attach explicit IES LM-63 photometric profiles, LLF (0.90 × 0.92 = 0.828), and NFPA 101 emergency battery pack ratings
+    {
+      type: "set_element_values",
+      elementIds: ["lt-1", "lt-2", "lt-13", "lt-15", "lt-17", "lt-20", "lt-11", "lt-11b", "lt-12b", "lt-12", "lt-205", "lt-206", "lt-207", "lt-208"],
+      values: { "electrical.photometric_profile": "downlight_6_led", "electrical.emergency_mode": "none", "electrical.lld": 0.9, "electrical.ldd": 0.92 },
+    },
+    {
+      type: "set_element_values",
+      elementIds: ["lt-3", "lt-14", "lt-16", "lt-18", "lt-19", "lt-215"],
+      values: { "electrical.photometric_profile": "downlight_6_led", "electrical.emergency_mode": "battery_pack", "electrical.emergency_lumens": 1400, "electrical.egress_fixture": true, "electrical.lld": 0.9, "electrical.ldd": 0.92 },
+    },
+    {
+      type: "set_element_values",
+      elementIds: ["lt-5", "lt-6", "lt-8", "lt-9", "lt-9b", "lt-21", "lt-22", "lt-23", "lt-24", "lt-210", "lt-211", "lt-214"],
+      values: { "electrical.photometric_profile": "troffer_2x4_led", "electrical.emergency_mode": "none", "electrical.lld": 0.9, "electrical.ldd": 0.92 },
+    },
+    {
+      type: "set_element_values",
+      elementIds: ["lt-4", "lt-7", "lt-10", "lt-209", "lt-212", "lt-213"],
+      values: { "electrical.photometric_profile": "troffer_2x4_led", "electrical.emergency_mode": "battery_pack", "electrical.emergency_lumens": 1400, "electrical.egress_fixture": true, "electrical.lld": 0.9, "electrical.ldd": 0.92 },
+    },
+    {
+      type: "set_element_values",
+      elementIds: ["lt-201", "lt-202", "lt-203", "lt-204", "lt-kit-1", "lt-kit-2", "lt-isl-1"],
+      values: { "electrical.photometric_profile": "linear_pendant_led", "electrical.emergency_mode": "none", "electrical.lld": 0.9, "electrical.ldd": 0.92 },
+    },
+    {
+      type: "set_element_values",
+      elementIds: ["exit-1"],
+      values: { "electrical.emergency_mode": "battery_pack", "electrical.egress_fixture": true },
+    },
+    {
+      type: "set_element_values",
+      elementIds: ["exit-2"],
+      values: { "electrical.photometric_profile": "exit_combo_wall_pack", "electrical.emergency_mode": "battery_pack", "electrical.emergency_lumens": 450, "electrical.egress_fixture": true, "electrical.lld": 0.95, "electrical.ldd": 0.95 },
+    },
+    {
+      type: "set_element_values",
+      elementIds: ["wp-1", "wp-2"],
+      values: { "electrical.photometric_profile": "exterior_wall_pack_led", "electrical.emergency_mode": "battery_pack", "electrical.emergency_lumens": 1800, "electrical.egress_fixture": true, "electrical.lld": 0.9, "electrical.ldd": 0.9 },
+    },
+    {
+      type: "set_element_values",
+      elementIds: ["wp-3", "wp-4"],
+      values: { "electrical.photometric_profile": "exterior_wall_pack_led", "electrical.emergency_mode": "none", "electrical.lld": 0.9, "electrical.ldd": 0.9 },
+    },
 
     // Electrical Feeders (MDP → HP-1, MDP → T-1 → LP-1) with NEC-sized copper conductors (live 3D length & AFC auto-calculated!)
     { type: "create_service_link", linkId: "fdr-hp1", sourceId: "mdp", positions: [1, 3, 5], electrical: { ratingA: 225, conductors: { sets: 1, phaseSize: "4/0", neutralSize: "4/0", groundSize: "4", material: "cu" } }, description: "Feeder to Panel HP-1 (480Y/277V)", members: [{ elementId: "hp-1" }] },
@@ -1353,8 +1437,9 @@ function buildShowcase(modelId: string): ModelState {
     // Panel HP-1 (480Y/277V) Branch Circuits — EVERY heavy MEP & lighting load circuited!
     { type: "create_service_link", linkId: "ckt-hp-rtu", sourceId: "hp-1", positions: [1, 3, 5], electrical: { ratingA: 25 }, description: "RTU-1 (Carrier 50FC-A06 5-Ton Packaged Unit)", members: [{ elementId: "rtu-1" }] },
     { type: "create_service_link", linkId: "ckt-hp-wh", sourceId: "hp-1", positions: [2, 4, 6], electrical: { ratingA: 30 }, description: "WH-1 (A.O. Smith DRE-52 18 kW Electric Water Heater)", members: [{ elementId: "wh-1" }] },
-    { type: "create_service_link", linkId: "ckt-hp-ltg1", sourceId: "hp-1", positions: [7], electrical: { ratingA: 20 }, description: "L1 Reception & Studio 277V Lighting + Emergency", members: [{ elementId: "lt-1" }, { elementId: "lt-2" }, { elementId: "lt-3" }, { elementId: "lt-13" }, { elementId: "lt-14" }, { elementId: "lt-15" }, { elementId: "lt-4" }, { elementId: "lt-5" }, { elementId: "lt-6" }, { elementId: "lt-7" }, { elementId: "lt-8" }, { elementId: "exit-1" }] },
-    { type: "create_service_link", linkId: "ckt-hp-ltg2", sourceId: "hp-1", positions: [9], electrical: { ratingA: 20 }, description: "L1 MEP Room & Restroom 277V Lighting", members: [{ elementId: "lt-9" }, { elementId: "lt-10" }, { elementId: "lt-11" }, { elementId: "lt-12" }] },
+    { type: "create_service_link", linkId: "ckt-hp-ltg1", sourceId: "hp-1", positions: [7], electrical: { ratingA: 20 }, description: "L1 Reception & Studio 277V Lighting + Emergency", members: [{ elementId: "lt-1" }, { elementId: "lt-2" }, { elementId: "lt-3" }, { elementId: "lt-16" }, { elementId: "lt-17" }, { elementId: "lt-13" }, { elementId: "lt-14" }, { elementId: "lt-15" }, { elementId: "lt-18" }, { elementId: "lt-19" }, { elementId: "lt-20" }, { elementId: "lt-kit-1" }, { elementId: "lt-kit-2" }, { elementId: "lt-isl-1" }, { elementId: "lt-4" }, { elementId: "lt-5" }, { elementId: "lt-21" }, { elementId: "lt-22" }, { elementId: "lt-6" }, { elementId: "lt-7" }, { elementId: "lt-23" }, { elementId: "lt-24" }, { elementId: "lt-8" }, { elementId: "exit-1" }, { elementId: "exit-2" }] },
+    { type: "create_service_link", linkId: "ckt-hp-ltg2", sourceId: "hp-1", positions: [9], electrical: { ratingA: 20 }, description: "L1 MEP Room & Restroom 277V Lighting", members: [{ elementId: "lt-9" }, { elementId: "lt-10" }, { elementId: "lt-9b" }, { elementId: "lt-11" }, { elementId: "lt-11b" }, { elementId: "lt-12b" }, { elementId: "lt-12" }] },
+    { type: "create_service_link", linkId: "ckt-hp-ltg3", sourceId: "hp-1", positions: [13], electrical: { ratingA: 20 }, description: "L2 Conference, Restroom & Mezzanine 277V Lighting + Emergency", members: [{ elementId: "lt-201" }, { elementId: "lt-202" }, { elementId: "lt-203" }, { elementId: "lt-204" }, { elementId: "lt-205" }, { elementId: "lt-206" }, { elementId: "lt-207" }, { elementId: "lt-208" }, { elementId: "lt-209" }, { elementId: "lt-210" }, { elementId: "lt-211" }, { elementId: "lt-212" }, { elementId: "lt-213" }, { elementId: "lt-214" }, { elementId: "lt-215" }] },
     { type: "create_service_link", linkId: "ckt-hp-ext", sourceId: "hp-1", positions: [11], electrical: { ratingA: 20 }, description: "Exterior Architectural Wall Sconces (Photocell/Timeclock)", members: [{ elementId: "wp-1" }, { elementId: "wp-2" }, { elementId: "wp-3" }, { elementId: "wp-4" }] },
 
     // Panel LP-1 (208Y/120V) Branch Circuits — Receptacles, GFCIs, Studio Quads, Plotter & Exhaust Fan EF-1!
@@ -1716,6 +1801,57 @@ function buildShowcase(modelId: string): ModelState {
     { type: "place_viewport", viewportId: "vp-controls", sheetId: "sheet-e201", viewId: "view-controls", center: { x: 605, y: 185 } },
     { type: "place_viewport", viewportId: "vp-sched-lctrl", sheetId: "sheet-e201", viewId: "view-sched-lctrl", center: { x: 200, y: 440 } },
     { type: "place_viewport", viewportId: "vp-sched-ltg", sheetId: "sheet-e201", viewId: "view-sched-ltg", center: { x: 565, y: 440 } },
+
+    // ---- Sheet E-202: Photometrics & Life-Safety Egress Compliance Plans + Schedules ----
+    {
+      type: "create_view",
+      viewId: "view-elec-photometrics",
+      name: "Level 1 — Lighting Photometrics Plan",
+      viewType: "ceiling_plan",
+      crop: { min: pt(-4 * FT, -4 * FT), max: pt(W_ALL + 4 * FT, D_ALL + 6 * FT) },
+      props: {
+        level: "Level 1",
+        scale: 64,
+        discipline: "electrical",
+        categoryOverrides: ELEC_LTG_HIDE,
+        circuitGraphics: { style: "off" },
+        photometrics: { photometricsMode: "normal", showContours: true, showGridValues: true, gridSpacingFt: 2 },
+      },
+    },
+    {
+      type: "create_view",
+      viewId: "view-elec-egress",
+      name: "Level 1 — Emergency Egress Lighting Plan",
+      viewType: "floor_plan",
+      crop: { min: pt(-4 * FT, -7 * FT), max: pt(W_ALL + 4 * FT, D_ALL + 8 * FT) },
+      props: {
+        level: "Level 1",
+        scale: 64,
+        discipline: "electrical",
+        categoryOverrides: ELEC_LTG_HIDE,
+        circuitGraphics: { style: "off" },
+        photometrics: { photometricsMode: "egress", showContours: true, showGridValues: true, gridSpacingFt: 2 },
+      },
+    },
+    {
+      type: "create_view",
+      viewId: "view-sched-photometrics",
+      name: "Photometric Summary Schedule",
+      viewType: "schedule",
+      props: { formSchedule: { kind: "photometric_summary", template: builtinFormTemplate("photometric_summary") } },
+    },
+    {
+      type: "create_view",
+      viewId: "view-sched-egress",
+      name: "Emergency / Egress Lighting Compliance Schedule",
+      viewType: "schedule",
+      props: { formSchedule: { kind: "egress_lighting_compliance", template: builtinFormTemplate("egress_lighting_compliance") } },
+    },
+    { type: "create_sheet", sheetId: "sheet-e202", number: "E-202", name: "PHOTOMETRICS & EGRESS COMPLIANCE", discipline: "electrical", group: "Electrical", sortOrder: 504 },
+    { type: "place_viewport", viewportId: "vp-elec-photometrics", sheetId: "sheet-e202", viewId: "view-elec-photometrics", center: { x: 235, y: 175 } },
+    { type: "place_viewport", viewportId: "vp-elec-egress", sheetId: "sheet-e202", viewId: "view-elec-egress", center: { x: 235, y: 445 } },
+    { type: "place_viewport", viewportId: "vp-sched-photometrics", sheetId: "sheet-e202", viewId: "view-sched-photometrics", center: { x: 635, y: 185 } },
+    { type: "place_viewport", viewportId: "vp-sched-egress", sheetId: "sheet-e202", viewId: "view-sched-egress", center: { x: 635, y: 430 } },
 
     // ---- Plumbing Views & Sheets (P-101 Overall Water + Enlarged Wet Core + Riser + Schedule; P-102 Overall DWV + Enlarged DWV + Riser + Isometric) ----
     {

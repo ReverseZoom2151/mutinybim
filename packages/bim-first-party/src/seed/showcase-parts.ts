@@ -440,6 +440,7 @@ export const SHOWCASE_GRAVITY_HOOD: { readonly id: string; readonly definition: 
 
 // =============================================================================
 // 3. Titus TMS-3-8-24X24 — 3-Cone Louvered Ceiling Supply Diffuser
+//    Cut sheet: 24"×24" lay-in T-bar face (610 mm), 8" round neck (203 mm)
 //    Origin z = 0 is the finished ceiling plane; collar extends UP into plenum.
 // =============================================================================
 export const SHOWCASE_DIFFUSER: { readonly id: string; readonly definition: PartTypeDefinition } = {

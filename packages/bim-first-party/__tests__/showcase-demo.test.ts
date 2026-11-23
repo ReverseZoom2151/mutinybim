@@ -13,7 +13,9 @@
  * - Leaves the legacy `createDemoModel("f-a-demo")` mechanical fixture untouched
  */
 import { buildSheetSceneFor, ceilingGridCellCenter, elementValues, evaluateDiagram, resolveElementMaterial, sceneToSvg, TILE_2FT_MM, TILE_4FT_MM, validateModel } from "@permitzip/bim-kernel";
+import { evaluateEgressPhotometrics, evaluateNormalPhotometrics } from "@permitzip/bim-pack-electrical";
 import { createDemoModel } from "@permitzip/bim-pack-mechanical/seed";
+import { plumbingDiagramGraph } from "@permitzip/bim-pack-plumbing";
 import { createShowcaseDemoModel } from "../src/seed";
 
 describe("createShowcaseDemoModel", () => {
@@ -171,7 +173,7 @@ describe("createShowcaseDemoModel", () => {
     }
   });
 
-  it("renders all 14 Arch D sheets cleanly with no unresolved callout references", () => {
+  it("renders all 15 Arch D sheets cleanly with no unresolved callout references and verified passing normal + egress photometrics", () => {
     const sheets = active.filter((el): el is Extract<typeof el, { kind: "sheet" }> => el.kind === "sheet");
     expect(sheets.map((s) => s.number).sort()).toEqual([
       "A-101",
@@ -184,11 +186,23 @@ describe("createShowcaseDemoModel", () => {
       "E-101",
       "E-102",
       "E-201",
+      "E-202",
       "M-101",
       "M-201",
       "P-101",
       "P-102",
     ]);
+
+    const normal = evaluateNormalPhotometrics(model, { gridSpacingFt: 2, interReflectance: true });
+    expect(normal.spaces.length).toBe(9);
+    expect(normal.failingSpaces).toBe(0);
+    expect(normal.pass).toBe(true);
+
+    const egress = evaluateEgressPhotometrics(model, { gridSpacingFt: 2, workplaneHeightIn: 0 });
+    expect(egress.paths.length).toBeGreaterThanOrEqual(4);
+    expect(egress.passInitial).toBe(true);
+    expect(egress.pass90Min).toBe(true);
+    expect(egress.pass).toBe(true);
 
     for (const sh of sheets) {
       const scene = buildSheetSceneFor(model, sh.id, { projectName: "MutinyBIM Showcase" });
@@ -200,9 +214,28 @@ describe("createShowcaseDemoModel", () => {
         expect(svg.replace(/\u00a0/g, " ")).toContain("AFC 42 KA");
         expect(svg).toContain("<a ");
       }
+      if (sh.number === "E-202") {
+        expect(svg).toContain("PHOTOMETRICS (NORMAL)");
+        expect(svg).toContain("EGRESS LIGHTING (NFPA 101)");
+        expect(svg).toContain("PHOTOMETRIC SUMMARY SCHEDULE");
+        expect(svg).toContain("EMERGENCY / EGRESS LIGHTING COMPLIANCE SCHEDULE");
+      }
     }
   });
 
+  it("integrates vent trees onto sanitary risers only, never onto domestic water risers", () => {
+    const graph = plumbingDiagramGraph(model.elements, {
+      systemKinds: ["domestic_cold_water", "domestic_hot_water", "sanitary", "vent"],
+    });
+    const hasService = (node: (typeof graph.roots)[number], service: string): boolean =>
+      node.service === service || node.children.some((c) => hasService(c, service));
+    const waterRoots = graph.roots.filter((r) => r.service === "domestic_cold_water");
+    const sanitaryRoots = graph.roots.filter((r) => r.service === "sanitary");
+    expect(waterRoots.length).toBeGreaterThan(0);
+    expect(sanitaryRoots.length).toBeGreaterThan(0);
+    for (const w of waterRoots) expect(hasService(w, "vent")).toBe(false);
+    expect(sanitaryRoots.some((r) => hasService(r, "vent"))).toBe(true);
+  });
   it("keeps legacy createDemoModel('f-a-demo') intact for existing fixtures and E2E specs", () => {
     const legacy = createDemoModel("f-a-demo");
     const legacyEls = elementValues(legacy.elements).filter((el) => !("deleted" in el && el.deleted));
