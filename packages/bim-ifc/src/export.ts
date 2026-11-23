@@ -14,6 +14,8 @@ import {
   buildClassIndex,
   ceilingRole,
   ceilingSlope,
+  fittingBody,
+  fittingMesh,
   ifcOrganizationProperties,
   linkAdapterId,
   loadAnchorOf,
@@ -46,6 +48,7 @@ import {
   type PartTypeElement,
   type PortRef,
   type Registry,
+  type RunSize,
   type ServiceLink,
   type ServiceRegistry,
   type ServiceRow,
@@ -55,7 +58,7 @@ import {
 import { activePackSet } from "@permitzip/bim-kernel/packs";
 import { elementTypeOf } from "@permitzip/bim-kernel/elements";
 import { LEGACY_QUANTITY_KEYS, QUANTITY_BINDINGS } from "@permitzip/bim-units";
-import { GeometryWriter, type Vec3 } from "./geometry";
+import { GeometryWriter, type Section, type Vec3 } from "./geometry";
 import { derivedIfcGuid, isIfcGuid, isUuid, projectNamespace, relationshipIfcGuid, uuidToIfcGuid } from "./guid";
 import { PROXY, primaryClass, resolveIfcClass, type ResolvedIfcClass } from "./mapping";
 import { ParameterHomes, PropertyBag, baselineParameterHomes, registryParameterHomes, writeSets, type ParameterHome, type PropertyInput } from "./properties";
@@ -148,6 +151,11 @@ const STRUCTURE_KINDS = new Set(["organization", "site", "level", "space", "room
 
 /** A ceiling's board, drawn up from its height: the thickness the 3D view draws (the kernel states none). */
 const CEILING_BOARD_MM = 20;
+
+/** A run's section as a swept profile: a rectangle for rect and oval duct, a circle for round duct, pipe and conduit. */
+function sectionOf(s: RunSize): Section {
+  return s.shape === "rect" || s.shape === "oval" ? { width: s.width, height: s.height } : s.shape === "round" ? { diameter: s.diameter } : s.shape === "pipe" ? { diameter: s.nominalMm } : { diameter: s.tradeSizeMm };
+}
 
 const ZONE_PURPOSE_SPATIAL: Readonly<Record<string, string>> = {
   thermal: "THERMAL",
@@ -604,7 +612,7 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     } else if (el.kind === "run_segment") {
       const placement = geo.placement(frame, geo.axis({ x: 0, y: 0, z: 0 }));
       const s = el.size;
-      const section = s.shape === "rect" || s.shape === "oval" ? { width: s.width, height: s.height } : s.shape === "round" ? { diameter: s.diameter } : s.shape === "pipe" ? { diameter: s.nominalMm } : { diameter: s.tradeSizeMm };
+      const section = sectionOf(s);
       const system = els[el.systemId];
       const systemName = system?.kind === "mep_system" ? system.name.trim() : "";
       const dimensions = `${Object.values(section).map((value) => Math.round(value * 10) / 10).join("x")} mm`;
@@ -618,6 +626,20 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
         const provided = cls.classId && fields.getClass(cls.classId) ? fields.field(cls.classId, path) : undefined;
         bag.put((declared ?? provided)?.ifc ?? null, { kind: "number", name: dimension, value, unit: "mm", measure: "IFCPOSITIVELENGTHMEASURE" }, "MutinyBIM_Run");
       }
+    } else if (el.kind === "run_fitting") {
+      // Placed at its own point; the body is the library shape the 3D view draws, or a leg to each port when the library has none.
+      const at = el.position;
+      const placement = geo.placement(frame, geo.axis(at));
+      let body: StepRef | null = null;
+      try {
+        const mesh = fittingMesh(fittingBody(els, el));
+        body = geo.mesh(mesh.positions.map((v, i) => v - (i % 3 === 0 ? at.x : i % 3 === 1 ? at.y : at.z)), mesh.indices, false);
+      } catch (err) {
+        console.error("[bim-ifc] fitting geometry did not resolve; exported as a leg to each port", { fittingId: el.id, err });
+      }
+      body ??= geo.legs(el.ports.map((port) => ({ start: { x: 0, y: 0, z: 0 }, end: { x: port.position.x - at.x, y: port.position.y - at.y, z: port.position.z - at.z }, section: sectionOf(port.size) })));
+      if (!body) warn(`${el.id}: its fitting has no library body and no ports with length, so it has no body in the file`);
+      product = writeElement(el, cls, stringField(el, "mark") ?? stringField(el, "label"), stringField(el, "mark"), placement, body);
     } else if (el.kind === "ceiling") {
       // The board the 3D view draws: its outline, less its holes, from its height up. In its room when it has one.
       const placement = geo.placement(frame, geo.axis({ x: 0, y: 0, z: 0 }));
