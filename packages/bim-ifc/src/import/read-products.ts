@@ -1,7 +1,7 @@
 import type { ImportGroup, ImportPort, ImportProduct, ImportSource, ImportStorey, ParamValue } from "@permitzip/bim-kernel";
 import { readStep, type ReadEntity, type StepFile, type StepToken } from "../read";
 import { ifcEntityName, ownAttributes } from "../schema-ifc4x3";
-import { GeometryReader, apply, boundsOf, compose, hostFrame, type Frame } from "./geometry";
+import { GeometryReader, apply, boundsIn, boundsOf, compose, hostFrame, type Frame } from "./geometry";
 
 /**
  * Read a linked IFC model into the importer's neutral products (round 9
@@ -257,7 +257,8 @@ export function readIfcSource(text: string, opts: IfcReadOptions): ImportSource 
         if (map) geo.readRepresentation(map.args[1], compose(frame, geo.axis2(map.args[0])), shape);
       }
     }
-    if (placementRef && file.entities.get(placementRef.id)?.type !== "IFCLOCALPLACEMENT") shape.unread ??= "placed on a grid or alignment";
+    const local = file.entities.get(placementRef.id)?.type === "IFCLOCALPLACEMENT";
+    if (!local) shape.unread ??= "placed on a grid or alignment";
     const hasShape = shape.extrusions.length > 0 || shape.points.length > 0;
     if (!hasShape && e.args[6]?.kind !== "ref") {
       const key = entity;
@@ -292,6 +293,7 @@ export function readIfcSource(text: string, opts: IfcReadOptions): ImportSource 
       hostId: hostId !== undefined ? gid(hostId) : null,
       groupIds: groupsOf.get(e.id) ?? [],
       geometry: { extrusions: shape.extrusions, bounds: boundsOf(shape.points), unread: shape.unread },
+      placement: local ? { origin: frame.o, xAxis: frame.x, zAxis: frame.z, bounds: boundsIn(frame, shape.points) } : null,
       properties: properties(e.id, type),
       overall: {
         width: widthIndex !== null ? numberOf(e.args[widthIndex], scale) : null,

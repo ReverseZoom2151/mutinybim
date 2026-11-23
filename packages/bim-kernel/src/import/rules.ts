@@ -7,7 +7,7 @@ import { activeServiceRegistry } from "../services/registry";
 import { PART_CATEGORIES, type PartCategory, type PartTypeDefinition } from "../parts";
 import type { ImportRuleContext, ImportRuleDef } from "./rule-point";
 import { axisAligned, outlineArea, outlineCentre, rectangleAxis, roundPlan, straightSweep, verticalPrism } from "./shape";
-import type { ImportProduct, ImportRuleResult } from "./types";
+import type { ImportPoint, ImportProduct, ImportRuleResult } from "./types";
 
 /**
  * The kernel's import rules: one per generic kind, reading only geometry and
@@ -21,7 +21,8 @@ const fail = (reason: string): ImportRuleResult => ({ ok: false, reason });
 
 const nameOf = (p: ImportProduct): string => p.name?.trim() || p.tag?.trim() || p.sourceId;
 const typeNameOf = (p: ImportProduct, fallback: string): string => (p.typeName?.trim() || p.objectType?.trim() || fallback).slice(0, 200);
-const round = (n: number): number => Math.round(n * 10) / 10;
+/** To 0.1 mm; a rounded-away negative reads 0, never -0. */
+const round = (n: number): number => Math.round(n * 10) / 10 + 0;
 
 function base(ctx: ImportRuleContext, p: ImportProduct, level: Level, suffix?: string) {
   const values = ctx.values(p);
@@ -264,10 +265,48 @@ function isPartCategory(v: unknown): v is PartCategory {
   return typeof v === "string" && (PART_CATEGORIES as readonly string[]).includes(v);
 }
 
+interface PartSeat {
+  /** The part's insertion point in the host frame, and its turn about the vertical. */
+  readonly origin: ImportPoint;
+  readonly rotationDeg: number;
+  /** Its shape's box from that point, along the part's own axes. */
+  readonly box: { readonly min: ImportPoint; readonly max: ImportPoint };
+  /** Whether that is the file's own placement, and why not when the file had one, for the report. */
+  readonly own: boolean;
+  readonly why: string | null;
+}
+
+/** How near the vertical a product's own z axis must be to count as upright (cosine; about 0.03°). */
+const UPRIGHT_COS = 1 - 1e-7;
+/** How far outside its shape's plan box an insertion point may be and still be the part's point, mm. */
+const SEAT_REACH_MM = 1;
+
 /**
- * A placed part from the product's box, of a part type made once per type in
- * the file. Its connectors aren't read from the file this round: the report
- * says so, and the part joins nothing until someone joins it.
+ * Where a part sits and how its box hangs off that point. The file's own
+ * placement when it is one a part can have: upright (a part turns about the
+ * vertical only) and within its shape in plan (a part is found, picked and
+ * roomed by its point). Otherwise the middle of the world box, not turned,
+ * as the box around the product.
+ */
+function partSeat(p: ImportProduct, world: { readonly min: ImportPoint; readonly max: ImportPoint }): PartSeat {
+  const boxed = (why: string | null): PartSeat => {
+    const origin = { x: (world.min.x + world.max.x) / 2, y: (world.min.y + world.max.y) / 2, z: world.min.z };
+    return { origin, rotationDeg: 0, own: false, why, box: { min: { x: world.min.x - origin.x, y: world.min.y - origin.y, z: 0 }, max: { x: world.max.x - origin.x, y: world.max.y - origin.y, z: world.max.z - origin.z } } };
+  };
+  const own = p.placement;
+  if (!own?.bounds) return boxed(null);
+  if (own.zAxis.z < UPRIGHT_COS) return boxed("it is tilted in the file, so it came in upright, as the box around it");
+  const { min, max } = own.bounds;
+  if (min.x > SEAT_REACH_MM || max.x < -SEAT_REACH_MM || min.y > SEAT_REACH_MM || max.y < -SEAT_REACH_MM) return boxed("its insertion point is away from its shape in the file, so it sits at the middle of its box, not turned");
+  const deg = Math.round(((Math.atan2(own.xAxis.y, own.xAxis.x) * 180) / Math.PI) * 1000) / 1000;
+  return { origin: own.origin, rotationDeg: ((deg % 360) + 360) % 360, box: own.bounds, own: true, why: null };
+}
+
+/**
+ * A placed part at the product's own insertion point and turn, as the box of
+ * its shape, of a part type made once per type in the file. Its connectors
+ * aren't read from the file this round: the report says so, and the part
+ * joins nothing until someone joins it.
  */
 const part: ImportRuleDef = {
   id: "kernel.part",
@@ -280,10 +319,13 @@ const part: ImportRuleDef = {
     if (!isPartCategory(category)) return fail(`${ctx.cls.label} doesn't say which part category it is`);
     const b = p.geometry.bounds;
     if (!b) return fail(p.geometry.unread ? `its shape is ${p.geometry.unread}` : "its size couldn't be read");
-    const size = { x: round(b.max.x - b.min.x), y: round(b.max.y - b.min.y), z: round(b.max.z - b.min.z) };
+    const seat = partSeat(p, b);
+    const size = { x: round(seat.box.max.x - seat.box.min.x), y: round(seat.box.max.y - seat.box.min.y), z: round(seat.box.max.z - seat.box.min.z) };
     if (size.x < 1 || size.y < 1 || size.z < 1) return fail("it has no size");
+    const centre = { x: round((seat.box.min.x + seat.box.max.x) / 2), y: round((seat.box.min.y + seat.box.max.y) / 2), z: round((seat.box.min.z + seat.box.max.z) / 2) };
     const typeName = typeNameOf(p, nameOf(p));
-    const typeKey = p.typeId ?? `${category}:${typeName}:${size.x}x${size.y}x${size.z}`;
+    // One file type's products share a part type only while they sit the same way: a type's box hangs off its own point.
+    const typeKey = `${p.typeId ?? `${category}:${typeName}:${size.x}x${size.y}x${size.z}@${centre.x},${centre.y},${centre.z}`}${seat.own ? "" : ":box"}`;
     const type = ctx.shared<PartTypeElement>(`part_type:${typeKey}`, () => {
       const definition: PartTypeDefinition = {
         familyName: typeName,
@@ -293,23 +335,24 @@ const part: ImportRuleDef = {
         typeValues: {},
         instanceParams: [],
         connectors: [],
-        geometry: [{ kind: "box", center: [0, 0, size.z / 2], size: [size.x, size.y, size.z] }],
-        symbol: [{ kind: "rect", center: [0, 0], size: [size.x, size.y] }],
+        geometry: [{ kind: "box", center: [centre.x, centre.y, centre.z], size: [size.x, size.y, size.z] }],
+        symbol: [{ kind: "rect", center: [centre.x, centre.y], size: [size.x, size.y] }],
         tagFields: ["mark"],
         source: { kind: "ifc", entity: p.entity, typeName, boundingBoxGeometry: true },
       };
-      return { id: ctx.idFor(p.typeId ?? `${p.sourceId}`, "type"), kind: "part_type", version: 0, authoredRev: {}, definition };
+      return { id: ctx.idFor(p.typeId ?? `${p.sourceId}`, seat.own ? "type" : "type-box"), kind: "part_type", version: 0, authoredRev: {}, definition };
     });
     if (typeof type === "string") return fail(type);
+    if (seat.why) ctx.note(`${typeName}: ${seat.why}`);
     if (p.ports.length > 0) ctx.note(`${typeName}: its ${p.ports.length === 1 ? "connection point wasn't" : `${p.ports.length} connection points weren't`} brought in; join it by hand`);
     const record: PartInstance = {
       ...base(ctx, p, level),
       kind: "part",
       typeId: type.id,
       levelId: level.id,
-      position: roundPlan({ x: (b.min.x + b.max.x) / 2, y: (b.min.y + b.max.y) / 2 }),
-      offsetMm: round(b.min.z - level.elevationMm),
-      rotationDeg: 0,
+      position: roundPlan(seat.origin),
+      offsetMm: round(seat.origin.z - level.elevationMm),
+      rotationDeg: seat.rotationDeg,
       mark: (p.tag?.trim() || p.name?.trim() || "").slice(0, 40),
       values: ctx.values(p),
     };
