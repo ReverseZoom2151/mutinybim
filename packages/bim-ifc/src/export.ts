@@ -12,6 +12,8 @@ import {
   spaceBoundaryFacts,
   withPackParameters,
   buildClassIndex,
+  ceilingRole,
+  ceilingSlope,
   ifcOrganizationProperties,
   linkAdapterId,
   loadAnchorOf,
@@ -143,6 +145,9 @@ export interface IfcExportResult {
 const NOT_EXPORTED_KINDS = new Set(["part_type", "element_type", "view", "sheet", "tag", "dimension", "viewport", "drawing_item", "drawing_underlay", "question", "service_catalog", "mounting_plane"]);
 /** Records the exporter writes in their own way (spatial tree, groups, ports). */
 const STRUCTURE_KINDS = new Set(["organization", "site", "level", "space", "room", "zone", "mep_system", "service_link", "load_point"]);
+
+/** A ceiling's board, drawn up from its height: the thickness the 3D view draws (the kernel states none). */
+const CEILING_BOARD_MM = 20;
 
 const ZONE_PURPOSE_SPATIAL: Readonly<Record<string, string>> = {
   thermal: "THERMAL",
@@ -530,6 +535,7 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     const bag = new PropertyBag();
     let product: Product;
     let spaceHint: string | null = null;
+    let hostSpace: string | null = null;
     let planned = false;
 
     if (el.kind === "part") {
@@ -612,6 +618,12 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
         const provided = cls.classId && fields.getClass(cls.classId) ? fields.field(cls.classId, path) : undefined;
         bag.put((declared ?? provided)?.ifc ?? null, { kind: "number", name: dimension, value, unit: "mm", measure: "IFCPOSITIVELENGTHMEASURE" }, "MutinyBIM_Run");
       }
+    } else if (el.kind === "ceiling") {
+      // The board the 3D view draws: its outline, less its holes, from its height up. In its room when it has one.
+      const placement = geo.placement(frame, geo.axis({ x: 0, y: 0, z: 0 }));
+      if (ceilingSlope(el)) warn(`${el.id}: a sloped ceiling is written flat at its stated height, so its body is only right where that height is measured`);
+      product = writeElement(el, cls, ceilingRole(el).label, null, placement, geo.prism(el.outline, el.heightMm, CEILING_BOARD_MM, el.holes));
+      hostSpace = el.spaceId && spaceRefs.has(el.spaceId) ? el.spaceId : null;
     } else {
       // Every other kind: placed at its stated point, with a body only where the kernel states a box.
       const pos: unknown = Reflect.get(el, "position");
@@ -635,7 +647,7 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
       const t = typicalMembers.get(typical.groupId) ?? { levelId, items: [] };
       t.items.push(product.ref);
       typicalMembers.set(typical.groupId, t);
-    } else containIn(levelId, planned ? spaceHint : null, product.ref);
+    } else containIn(levelId, planned ? spaceHint : hostSpace, product.ref);
     const groupName = ifcOrganizationProperties(model, el)?.group.name;
     if (groupName) push(groupMembers, groupName, product.ref);
   }
