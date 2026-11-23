@@ -884,11 +884,36 @@ function squareTree(start: Node, rest: readonly Node[]): Array<readonly [Node, N
   return out;
 }
 
-/** Pairs to join in drawing order: a tree for square lines, the nearest-neighbour chain otherwise. */
+/** Arc style: minimum spanning tree rooted at `start` (Euclidean distance) so mid-circuit home-runs branch naturally without long loop-back crossings. */
+function arcTree(start: Node, rest: readonly Node[]): Array<readonly [Node, Node]> {
+  const inTree: Node[] = [start];
+  const left = [...rest];
+  const out: Array<readonly [Node, Node]> = [];
+  while (left.length > 0) {
+    let bi = 0;
+    let bt = start;
+    let bd = Infinity;
+    for (let i = 0; i < left.length; i++) {
+      for (const t of inTree) {
+        const d = dist(t.point, left[i]!.point);
+        if (d < bd) {
+          bd = d;
+          bi = i;
+          bt = t;
+        }
+      }
+    }
+    const next = left.splice(bi, 1)[0]!;
+    out.push([bt, next]);
+    inTree.push(next);
+  }
+  return out;
+}
+
+/** Pairs to join in drawing order: a tree rooted at the home run (Manhattan for square lines, Euclidean for arcs). */
 function joinPairs(style: CircuitGraphicStyle, start: Node, rest: readonly Node[]): Array<readonly [Node, Node]> {
   if (style === "orthogonal") return squareTree(start, rest);
-  const ordered = chain(start, rest);
-  return ordered.slice(1).map((b, i) => [ordered[i]!, b] as const);
+  return arcTree(start, rest);
 }
 
 /**
@@ -1482,9 +1507,11 @@ export function circuitHomeRunsOnPaper(model: ModelState, view: ViewElement, sho
     const text = textLook?.uppercase ? hr.label.toUpperCase() : hr.label;
     const w = Math.max(labelSize, text.length * labelSize * 0.62);
     const defaultPos = homeRunLabel(fromPaper, tipPaper, u, n, w, labelSize)[0]!;
-    const labelAtPaper = hr.labelAt ? toPaper(hr.labelAt) : defaultPos.at;
+    const rawLabelAt = hr.labelAt ? toPaper(hr.labelAt) : defaultPos.at;
     const anchor: TextAnchor = hr.labelAt ? "middle" : defaultPos.anchor;
-    const labelBoxPaper = textBox(labelAtPaper, w + 0.8, labelSize + 0.6, anchor);
+    const labelBoxPaper = textBox(rawLabelAt, w + 0.8, labelSize + 0.6, anchor);
+    // Report the exact visual center so dragging a homerun label (which switches anchor to "middle") never jumps sideways on click.
+    const labelAtPaper = { x: (labelBoxPaper.min.x + labelBoxPaper.max.x) / 2, y: rawLabelAt.y };
     const link = model.elements[g.linkId];
     const name = link?.kind === "service_link" ? serviceLinkName(model.elements, link) : g.linkId;
     const member = shown.get(hr.memberId);
@@ -1831,7 +1858,7 @@ function drawCircuitGraphicsInk(
             if (source.homeRun.labelAt) {
               const at = ctx.toPaper(source.homeRun.labelAt);
               if (fits(at, w, "middle", labelSize)) {
-                ctx.prims.push({ kind: "text", at, text, size: labelSize, anchor: "middle", ...textExtras });
+                ctx.prims.push({ kind: "text", at, text, size: labelSize, anchor: "middle", mask: true, ...textExtras });
                 taken.push(textBox(at, w, labelSize, "middle"));
               }
             } else {
@@ -1840,7 +1867,7 @@ function drawCircuitGraphicsInk(
               const fallback = candidates[0]!;
               const place = label ?? (fits(fallback.at, w, fallback.anchor, labelSize) ? fallback : null);
               if (place) {
-                ctx.prims.push({ kind: "text", at: place.at, text, size: labelSize, anchor: place.anchor, ...textExtras });
+                ctx.prims.push({ kind: "text", at: place.at, text, size: labelSize, anchor: place.anchor, mask: true, ...textExtras });
                 taken.push(textBox(place.at, w, labelSize, place.anchor));
               }
             }
@@ -1860,7 +1887,8 @@ function drawCircuitGraphicsInk(
             text: n.text,
             size: sz,
             anchor: "start",
-            ...(source.kind === "switch_leg" ? { italic: true, mask: true } : {}),
+            mask: true,
+            ...(source.kind === "switch_leg" ? { italic: true } : {}),
             ...textExtras,
           });
           taken.push(textBox(at, w, sz, "start"));

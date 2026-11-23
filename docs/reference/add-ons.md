@@ -31,6 +31,7 @@ Panels, circuits, feeders and their loads; dedicated equipment space; electrical
 | Diagram graphs | 3 |
 | Diagram layouts | 2 |
 | Disciplines | 1 |
+| Element classes | 2 |
 | Field providers | 1 |
 | Field resolvers | 1 |
 | Form schedules | 6 |
@@ -163,7 +164,7 @@ Grids, walls, doors, windows, openings, floors, ceilings, roofs, columns and sta
 | IFC import rules | 2 |
 | IFC relationships | 3 |
 | Linked model categories in plans | 4 |
-| Materials | 25 |
+| Materials | 32 |
 | Parameter sets | 1 |
 | Plan graphics by class | 2 |
 | Starter element types | 4 |

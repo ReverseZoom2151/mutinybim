@@ -92,6 +92,12 @@ Rules (these are firm):
   in T1", "kitchen 4 units at 80% (NEC 2023 Table 220.56)". If
   `rules_placeholder` is true, say the totals are connected loads, not a code
   calculation, and ask for the NEC edition (or to record it in the Code Study).
+- **Live one-line fault current & feeder length estimation**: pass
+  `hints: { faultCurrent: true, lengthMode: "shortest" | "manhattan" | "explicit", showLoads: true }`
+  on `documents.diagram(ctx, { kind: "one_line", ... })` (or `bim_layout_one_line`)
+  to compute available fault current (AFC) and compare against panel `aic` ratings
+  automatically using explicit `lengthFt`, 3D straight-line (`"shortest"`), or
+  Manhattan (`"manhattan"`) gear-to-gear distance.
 
 ### Workflow: circuit a floor
 
