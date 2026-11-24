@@ -1,4 +1,4 @@
-import type { ImportExtrusion, ImportPoint } from "@permitzip/bim-kernel";
+import { OUTLINE_WITH_HOLES, type ImportExtrusion, type ImportPoint } from "@permitzip/bim-kernel";
 import type { ReadEntity, StepFile, StepToken } from "../read";
 
 /**
@@ -52,6 +52,8 @@ export interface ShapeReading {
   readonly extrusions: ImportExtrusion[];
   readonly points: ImportPoint[];
   unread: string | null;
+  /** An outline with holes was read, holes and all. Only that: `unread` says anything else that wasn't read. */
+  holed?: boolean;
 }
 
 /** Reads entity graph geometry in file units times `scale` (mm per file unit). */
@@ -163,6 +165,7 @@ export class GeometryReader {
           return;
         }
         if (profile.unread) out.unread ??= profile.unread;
+        if (profile.holes) out.holed = true;
         const base = profile.points.map((p) => apply(local, { x: p.x, y: p.y, z: 0 }));
         const along = rotate(local, mul(dir, length));
         const extrusion: ImportExtrusion = {
@@ -170,6 +173,7 @@ export class GeometryReader {
           along,
           ...(profile.circle ? { circle: { centre: apply(local, { x: profile.circle.cx, y: profile.circle.cy, z: 0 }), radius: profile.circle.r } } : {}),
           ...(profile.rectangle ? { rectangle: profile.rectangle } : {}),
+          ...(profile.holes ? { holes: profile.holes.map((hole) => hole.map((p) => apply(local, { x: p.x, y: p.y, z: 0 }))) } : {}),
         };
         out.extrusions.push(extrusion);
         for (const p of base) out.points.push(p, add(p, along));
@@ -252,7 +256,7 @@ export class GeometryReader {
   }
 
   /** A profile in its own plane: points (closed, in order), and whether it is a rectangle or a circle. */
-  profile(t: StepToken | undefined): { points: { x: number; y: number }[]; rectangle?: { x: number; y: number }; circle?: { cx: number; cy: number; r: number }; unread?: string } | null {
+  profile(t: StepToken | undefined): { points: { x: number; y: number }[]; rectangle?: { x: number; y: number }; circle?: { cx: number; cy: number; r: number }; holes?: { x: number; y: number }[][]; unread?: string } | null {
     const e = this.entity(t);
     if (!e) return null;
     const pos = this.axis2(e.args[2]);
@@ -288,7 +292,11 @@ export class GeometryReader {
         const curve = this.entity(e.args[2]);
         const points = this.curvePoints(curve);
         if (!points) return { points: [], unread: "a curved outline" };
-        return e.type === "IFCARBITRARYPROFILEDEFWITHVOIDS" ? { points, unread: "an outline with holes" } : { points };
+        if (e.type !== "IFCARBITRARYPROFILEDEFWITHVOIDS") return { points };
+        // Every hole read: they go with the outline. One that has arcs or isn't a closed line: the outline alone, and the reason.
+        const inner = e.args[3]?.kind === "list" ? e.args[3].items.map((item) => this.curvePoints(this.entity(item))) : [];
+        const holes = inner.filter((hole): hole is { x: number; y: number }[] => hole !== null);
+        return holes.length === inner.length ? { points, holes } : { points, unread: OUTLINE_WITH_HOLES };
       }
       default:
         return null;

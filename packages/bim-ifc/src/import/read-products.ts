@@ -1,4 +1,4 @@
-import type { ImportGroup, ImportPort, ImportProduct, ImportSource, ImportStorey, ParamValue } from "@permitzip/bim-kernel";
+import { OUTLINE_WITH_HOLES, type ImportGroup, type ImportPort, type ImportProduct, type ImportSource, type ImportStorey, type ParamValue } from "@permitzip/bim-kernel";
 import { readStep, type ReadEntity, type StepFile, type StepToken } from "../read";
 import { ifcEntityName, ownAttributes } from "../schema-ifc4x3";
 import { GeometryReader, apply, boundsOf, compose, hostFrame, type Frame } from "./geometry";
@@ -298,7 +298,7 @@ export function readIfcSource(text: string, opts: IfcReadOptions): ImportSource 
       hostId: hostId !== undefined ? gid(hostId) : null,
       ...(openings > 0 ? { openings } : {}),
       groupIds: groupsOf.get(e.id) ?? [],
-      geometry: { extrusions: shape.extrusions, bounds: boundsOf(shape.points), unread: shape.unread },
+      geometry: { extrusions: shape.extrusions, bounds: boundsOf(shape.points), unread: shape.unread ?? (shape.holed ? OUTLINE_WITH_HOLES : null) },
       properties: properties(e.id, type),
       overall: {
         width: widthIndex !== null ? numberOf(e.args[widthIndex], scale) : null,

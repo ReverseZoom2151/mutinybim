@@ -7,7 +7,7 @@ import { connectorDomainOf, sizeFitsDomain } from "../routing/rules";
 import { activeServiceRegistry } from "../services/registry";
 import { PART_CATEGORIES, type PartCategory, type PartTypeDefinition } from "../parts";
 import type { ImportRuleContext, ImportRuleDef } from "./rule-point";
-import { axisAligned, outlineArea, outlineCentre, rectangleAxis, roundPlan, straightSweep, verticalPrism } from "./shape";
+import { axisAligned, holedPrism, outlineArea, outlineCentre, rectangleAxis, roundPlan, straightSweep, verticalPrism } from "./shape";
 import type { ImportProduct, ImportRuleResult } from "./types";
 
 /**
@@ -79,7 +79,10 @@ const slab: ImportRuleDef = {
   },
 };
 
-/** A flat ceiling from one footprint pushed straight up: its underside is the ceiling, at its height above the level. */
+/** The most holes a ceiling here can have (the ceiling commands' own limit). */
+const CEILING_HOLES_MAX = 200;
+
+/** A flat ceiling from one footprint pushed straight up, less the holes cut through it: its underside is the ceiling, at its height above the level. */
 const ceiling: ImportRuleDef = {
   id: "kernel.ceiling",
   label: "Flat ceilings",
@@ -87,11 +90,20 @@ const ceiling: ImportRuleDef = {
   convert(p, ctx) {
     const level = needLevel(ctx, p);
     if (typeof level === "string") return fail(level);
-    const prism = verticalPrism(p.geometry);
+    const prism = holedPrism(p.geometry);
     if (!prism) return fail(p.geometry.unread ? `its shape is ${p.geometry.unread}` : "it isn't flat (sloped or shaped)");
     // An opening cut as its own element leaves the outline whole, so the outline alone would bring the ceiling in filled.
     if ((p.openings ?? 0) > 0) return fail("it has openings cut through it, and those aren't read from the file yet");
-    const record: Ceiling = { ...base(ctx, p, level), kind: "ceiling", levelId: level.id, outline: prism.outline.map(roundPlan), form: "flat", heightMm: round(prism.bottom - level.elevationMm) };
+    if (prism.holes.length > CEILING_HOLES_MAX) return fail(`it has ${prism.holes.length} holes, and a ceiling here takes ${CEILING_HOLES_MAX} at most`);
+    const record: Ceiling = {
+      ...base(ctx, p, level),
+      kind: "ceiling",
+      levelId: level.id,
+      outline: prism.outline.map(roundPlan),
+      ...(prism.holes.length > 0 ? { holes: prism.holes.map((hole) => hole.map(roundPlan)) } : {}),
+      form: "flat",
+      heightMm: round(prism.bottom - level.elevationMm),
+    };
     return { ok: true, records: [record] };
   },
 };

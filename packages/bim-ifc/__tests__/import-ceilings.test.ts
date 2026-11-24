@@ -5,8 +5,9 @@
  * ceiling as its outline pushed up from its height; the kernel had no import
  * rule for the kind, so a reader said "Ceilings can't be edited here yet" and
  * left every one on the linked model. A ceiling's underside is now read as
- * its height above its level. One whose shape isn't a single flat outline
- * (holes, a slope written by another tool) stays linked, with the reason.
+ * its height above its level, and the holes in its outline come with it.
+ * One whose shape isn't a single flat outline (a slope written by another
+ * tool, a hole with a curved edge) stays linked, with the reason.
  */
 import { DEFAULT_SETTINGS, asRevision, gatedRecordFeatures, landImport, type BimElement, type ModelState } from "@permitzip/bim-kernel";
 import { runScript, sliceModel, type ScriptDefinition } from "@permitzip/bim-script";
@@ -114,16 +115,63 @@ describe("importIfc: ceilings (#59)", () => {
     expect(ceilingsLine(cut.report)).toEqual({ classId: "arch.ceiling", label: "Ceilings", converted: 0, linked: [{ reason: "it has openings cut through it, and those aren't read from the file yet", count: 1 }] });
   });
 
-  it("leaves a ceiling with holes on the linked model, and says why", async () => {
+  it("brings a ceiling's holes back with it", async () => {
     const model = await build(smallOffice);
     const ceilings = ofKind(model, "ceiling");
     const [first] = ceilings;
     const [a] = first?.outline ?? [];
     if (!first || !a) throw new Error("small-office has no ceiling");
-    const hole = [{ x: a.x + 1000, y: a.y + 1000 }, { x: a.x + 2000, y: a.y + 1000 }, { x: a.x + 2000, y: a.y + 2000 }, { x: a.x + 1000, y: a.y + 2000 }];
-    const back = roundTrip(withElement(model, { ...first, holes: [hole] }));
+    const holes = [
+      [{ x: a.x + 1000, y: a.y + 1000 }, { x: a.x + 2000, y: a.y + 1000 }, { x: a.x + 2000, y: a.y + 2000 }, { x: a.x + 1000, y: a.y + 2000 }],
+      [{ x: a.x + 3000, y: a.y + 1000 }, { x: a.x + 3600, y: a.y + 1000 }, { x: a.x + 3300, y: a.y + 1800 }],
+    ];
+    const back = roundTrip(withElement(model, { ...first, holes }));
 
-    expect(back.of(first)).toBeUndefined();
-    expect(ceilingsLine(back.report)).toEqual({ classId: "arch.ceiling", label: "Ceilings", converted: ceilings.length - 1, linked: [{ reason: "its shape is an outline with holes", count: 1 }] });
+    expect(ceilingsLine(back.report)).toEqual({ classId: "arch.ceiling", label: "Ceilings", converted: ceilings.length, linked: [] });
+    const got = back.of(first);
+    if (got?.kind !== "ceiling") throw new Error("the ceiling with holes did not come back as a ceiling");
+    expect(got.outline).toEqual(first.outline);
+    expect(got.holes).toEqual(holes);
+    expect(got.heightMm).toBe(first.heightMm);
+    // A ceiling without holes still has none, not an empty list.
+    const plain = ceilings[1] ? back.of(ceilings[1]) : undefined;
+    expect(plain?.kind === "ceiling" ? "holes" in plain : null).toBe(false);
+
+    const landed = landImport(emptyModel(), back.records);
+    expect(landed.dropped).toEqual([]);
+    expect(ofKind(landed.model, "ceiling").find((c) => c.id === got.id)?.holes).toEqual(holes);
+  });
+
+  /** A 4 m x 3 m outline with one hole, as an `IfcArbitraryProfileDefWithVoids`; `arc` writes the hole with a curved edge. */
+  const holedProfile = (t: IfcText, arc = false): number => {
+    const line = (points: readonly (readonly [number, number])[]) => t.add("IFCPOLYLINE", `(${[...points, points[0] ?? [0, 0]].map(([x, y]) => `#${t.pt(x, y)}`).join(",")})`);
+    const outer = line([[0, 0], [4000, 0], [4000, 3000], [0, 3000]]);
+    const corners: readonly (readonly [number, number])[] = [[1000, 1000], [2000, 1000], [2000, 2000], [1000, 2000]];
+    const inner = arc
+      ? t.add("IFCINDEXEDPOLYCURVE", `#${t.add("IFCCARTESIANPOINTLIST2D", `(${corners.map(([x, y]) => `(${x}.,${y}.)`).join(",")}),$`)},(IFCLINEINDEX((1,2)),IFCARCINDEX((2,3,4)),IFCLINEINDEX((4,1))),$`)
+      : line(corners);
+    return t.add("IFCARBITRARYPROFILEDEFWITHVOIDS", `.AREA.,$,#${outer},(#${inner})`);
+  };
+  const from = (t: IfcText) => importIfc(t.text(), { model: hostModel(), referenceId: "ref", sourceKey: "holes", sourceId: "v1", label: "Other tool", disciplines: ["architecture"] });
+
+  it("leaves a ceiling on the linked model when a hole has a curved edge, and says why", () => {
+    const t = IfcText.start();
+    t.storey("Level 1", 0);
+    t.product("Level 1", "IFCCOVERING", "Ceiling", [0, 0, 0], t.body([t.extrude(holedProfile(t, true), 20, t.axis3([0, 0, 2700]))]), ".CEILING.");
+    const plan = from(t);
+    expect(ofKind(plan.records, "ceiling")).toEqual([]);
+    expect(ceilingsLine(plan.report)).toEqual({ classId: "arch.ceiling", label: "Ceilings", converted: 0, linked: [{ reason: "its shape is an outline with holes", count: 1 }] });
+  });
+
+  it("still leaves a floor with a hole on the linked model: only a ceiling takes holes", () => {
+    const t = IfcText.start();
+    t.storey("Level 1", 0);
+    t.product("Level 1", "IFCSLAB", "Floor", [0, 0, -250], t.body([t.extrude(holedProfile(t), 250)]), ".FLOOR.");
+    t.product("Level 1", "IFCCOVERING", "Ceiling", [0, 0, 0], t.body([t.extrude(holedProfile(t), 20, t.axis3([0, 0, 2700]))]), ".CEILING.");
+    const plan = from(t);
+    expect(ofKind(plan.records, "slab")).toEqual([]);
+    expect(plan.report.classes.flatMap((c) => c.linked.map((l) => l.reason))).toEqual(["its shape is an outline with holes"]);
+    const [ceiling] = ofKind(plan.records, "ceiling");
+    expect(ceiling?.holes).toEqual([[{ x: 1000, y: 1000 }, { x: 2000, y: 1000 }, { x: 2000, y: 2000 }, { x: 1000, y: 2000 }]]);
   });
 });

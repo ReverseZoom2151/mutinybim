@@ -23,7 +23,16 @@ export interface ImportExtrusion {
   readonly circle?: { readonly centre: ImportPoint; readonly radius: number };
   /** Set when the profile is a rectangle: its two side lengths (first along the profile's own x). */
   readonly rectangle?: { readonly x: number; readonly y: number };
+  /** Holes cut through the profile, each an outline in world space on the profile's plane. Set only when every hole was read. */
+  readonly holes?: readonly (readonly ImportPoint[])[];
 }
+
+/**
+ * `ImportGeometry.unread` for a shape that was read exactly except that its outline has holes. A reader gives this
+ * reason only when the holes are the one thing unread, and then puts them on the extrusion (`holes`), so a rule
+ * for a kind that can have holes may take them; every other rule refuses the shape as before.
+ */
+export const OUTLINE_WITH_HOLES = "an outline with holes";
 
 /** What the reader understood of a product's shape. */
 export interface ImportGeometry {
