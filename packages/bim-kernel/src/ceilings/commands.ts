@@ -4,11 +4,11 @@ import { finish, guard, refuse, type AuthoredWrite, type ExecuteResult } from ".
 import { REGISTRY_ID_MAX_LENGTH, REGISTRY_ID_PATTERN } from "../ids";
 import { TrackedReader } from "../model";
 import { activeClassRegistry } from "../registry";
-import { containsPoint, outlineAreaMm2, outlineProblem, MM2_PER_M2 } from "../spaces/space-geometry";
+import { outlineAreaMm2, outlineProblem, MM2_PER_M2 } from "../spaces/space-geometry";
 import { draftElements } from "../store";
 import { asElementId, type BimElement, type ElementId, type Level, type ModelState, type Partition, type Vec2 } from "../types";
 import { CEILING_CLASS_ID, CEILINGS_NOT_YET, ceilingsWritable } from "./feature";
-import { checkCeilingOutline } from "./outline";
+import { checkCeilingHole, checkCeilingOutline } from "./outline";
 import { ceilingForm, ceilingLabel, ceilingSlope, defaultRoleForForm, isCeiling, surfaceRoles } from "./read";
 import { ceilingStructureProblem, ftIn } from "./structure";
 import { CEILING_HEIGHT_MAX_MM, CEILING_HOLES_MAX, CEILING_OUTLINE_MAX_POINTS, KNOWN_CEILING_FORMS, type Ceiling, type CeilingForm, type CeilingGrid, type CeilingSlope } from "./types";
@@ -195,7 +195,7 @@ function cleanedHoles(holes: readonly (readonly Vec2[])[] | null | undefined, ar
   const out: Vec2[][] = [];
   for (const h of holes ?? []) {
     const hole = cleanedOutline(h, "hole");
-    if (!hole.every((p) => containsPoint(around, p))) refuse("invalid_value", "A hole must sit inside the ceiling's outline. Draw the opening within it, or redraw the outline around it");
+    if (checkCeilingHole(hole, around).fault === "outside") refuse("invalid_value", "A hole must sit inside the ceiling's outline. Draw the opening within it, or redraw the outline around it");
     out.push(hole);
   }
   return out;

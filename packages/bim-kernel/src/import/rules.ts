@@ -1,16 +1,15 @@
 import { asElementId } from "../types";
 import { GLOBAL_PARTITION } from "../partition";
-import type { Beam, Column, Component, ElementId, Level, MepSystem, Opening, PartInstance, PartTypeElement, Room, RunDomain, RunSegment, RunSize, Slab, Wall } from "../types";
-import { checkCeilingOutline } from "../ceilings/outline";
+import type { Beam, Column, Component, ElementId, Level, MepSystem, Opening, PartInstance, PartTypeElement, Room, RunDomain, RunSegment, RunSize, Slab, Vec2, Wall } from "../types";
+import { checkCeilingHole, checkCeilingOutline, type HoleFault } from "../ceilings/outline";
 import { CEILING_HEIGHT_MAX_MM, CEILING_HOLES_MAX, CEILING_OUTLINE_MAX_POINTS, type Ceiling } from "../ceilings/types";
 import { RUN_DOMAINS } from "../routing/types";
 import { connectorDomainOf, sizeFitsDomain } from "../routing/rules";
 import { activeServiceRegistry } from "../services/registry";
-import type { OutlineFault } from "../spaces/space-geometry";
 import { PART_CATEGORIES, type PartCategory, type PartTypeDefinition } from "../parts";
 import type { ImportRuleContext, ImportRuleDef } from "./rule-point";
 import { axisAligned, holedPrism, outlineArea, outlineCentre, rectangleAxis, roundPlan, straightSweep, verticalPrism } from "./shape";
-import type { ImportProduct, ImportRuleResult } from "./types";
+import { OUTLINE_WITH_HOLES, type ImportProduct, type ImportRuleResult } from "./types";
 
 /**
  * The kernel's import rules: one per generic kind, reading only geometry and
@@ -81,13 +80,16 @@ const slab: ImportRuleDef = {
   },
 };
 
-/** What is wrong with an outline the commands refuse, to follow "its outline". */
-const OUTLINE_FAULTS: Readonly<Record<OutlineFault, string>> = {
+/** What is wrong with an outline or a hole the commands refuse, to follow "its outline" or "one of its holes". */
+const OUTLINE_FAULTS: Readonly<Record<HoleFault, string>> = {
   too_few_corners: "has fewer than 3 corners",
   not_a_number: "has a corner that isn't a number",
   crosses_itself: "crosses itself",
   too_small: "covers almost nothing (under 1 sq ft)",
+  outside: "isn't inside its outline",
 };
+
+const NOT_FLAT = "it isn't flat (sloped or shaped)";
 
 /**
  * A flat ceiling from one footprint pushed straight up, less the holes cut through it: its underside is the ceiling,
@@ -102,7 +104,12 @@ const ceiling: ImportRuleDef = {
     const level = needLevel(ctx, p);
     if (typeof level === "string") return fail(level);
     const prism = holedPrism(p.geometry);
-    if (!prism) return fail(p.geometry.unread ? `its shape is ${p.geometry.unread}` : "it isn't flat (sloped or shaped)");
+    if (!prism) {
+      const { unread } = p.geometry;
+      if (unread !== OUTLINE_WITH_HOLES) return fail(unread ? `its shape is ${unread}` : NOT_FLAT);
+      // Holes are read for a ceiling, so having them is no reason: say what is wrong with the shape, or with a hole.
+      return fail(verticalPrism({ ...p.geometry, unread: null }) ? "one of its holes couldn't be read (curved, or not a closed line)" : NOT_FLAT);
+    }
     const [shape] = p.geometry.extrusions;
     // A ceiling is its plan outline, so a footprint read only as a size or as a sampled circle isn't one to take.
     if (shape?.circle) return fail("its outline is a circle, and a ceiling here has straight edges");
@@ -115,9 +122,14 @@ const ceiling: ImportRuleDef = {
     const { outline, fault } = checkCeilingOutline(drawn);
     if (fault) return fail(`its outline ${OUTLINE_FAULTS[fault]}`);
     if (prism.holes.length > CEILING_HOLES_MAX) return fail(`it has ${prism.holes.length} holes, and a ceiling here takes ${CEILING_HOLES_MAX} at most`);
-    const holes = prism.holes.map((hole) => hole.map(roundPlan));
-    const most = holes.reduce((n, hole) => Math.max(n, hole.length), 0);
+    const most = prism.holes.reduce((n, hole) => Math.max(n, hole.length), 0);
     if (most > CEILING_OUTLINE_MAX_POINTS) return fail(`one of its holes has ${most} corners, and a hole here takes ${CEILING_OUTLINE_MAX_POINTS} at most`);
+    const holes: Vec2[][] = [];
+    for (const cut of prism.holes) {
+      const hole = checkCeilingHole(cut.map(roundPlan), outline);
+      if (hole.fault) return fail(`one of its holes ${OUTLINE_FAULTS[hole.fault]}`);
+      holes.push(hole.outline);
+    }
     const heightMm = round(prism.bottom - level.elevationMm);
     if (!(heightMm > 0)) return fail("it sits at or below the floor of its level, and a ceiling here is above it");
     if (heightMm > CEILING_HEIGHT_MAX_MM) return fail(`it is more than ${CEILING_HEIGHT_MAX_MM / 1000} m above its level, higher than a ceiling here can be`);

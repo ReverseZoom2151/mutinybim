@@ -11,7 +11,7 @@
  * linked, with the reason, and so does one the ceiling commands would refuse
  * (at or below its level's floor, too many corners).
  */
-import { DEFAULT_SETTINGS, asRevision, gatedRecordFeatures, landImport, type BimElement, type ModelState } from "@permitzip/bim-kernel";
+import { DEFAULT_SETTINGS, asRevision, gatedRecordFeatures, landImport, measureElement, type BimElement, type ModelState } from "@permitzip/bim-kernel";
 import { runScript, sliceModel, type ScriptDefinition } from "@permitzip/bim-script";
 import { PROTOCOL_FEATURES } from "@permitzip/bim-sync";
 import { exportIfc, importIfc, readIfcSource } from "../src";
@@ -162,7 +162,7 @@ describe("importIfc: ceilings (#59)", () => {
     t.product("Level 1", "IFCCOVERING", "Ceiling", [0, 0, 0], t.body([t.extrude(holedProfile(t, true), 20, t.axis3([0, 0, 2700]))]), ".CEILING.");
     const plan = from(t);
     expect(ofKind(plan.records, "ceiling")).toEqual([]);
-    expect(ceilingsLine(plan.report)).toEqual({ classId: "arch.ceiling", label: "Ceilings", converted: 0, linked: [{ reason: "its shape is an outline with holes", count: 1 }] });
+    expect(ceilingsLine(plan.report)).toEqual({ classId: "arch.ceiling", label: "Ceilings", converted: 0, linked: [{ reason: "one of its holes couldn't be read (curved, or not a closed line)", count: 1 }] });
   });
 
   it("still leaves a floor with a hole on the linked model: only a ceiling takes holes", () => {
@@ -267,8 +267,10 @@ describe("importIfc: ceilings (#59)", () => {
   });
 
   it("reads an indexed curve with no segments as a line through its points as stored", () => {
-    const stored = SHUFFLED.map(([x, y]) => ({ x, y }));
-    expect(ofKind(holedPair(null).records, "ceiling").map((c) => c.holes)).toEqual([[stored]]);
+    // Stored out of order, the square is a bow tie: read as stored, it is a hole the ceiling commands refuse.
+    const plan = holedPair(null);
+    expect(ofKind(plan.records, "ceiling")).toEqual([]);
+    expect(ceilingsLine(plan.report)).toEqual(linked("one of its holes crosses itself"));
   });
 
   it.each([
@@ -278,7 +280,7 @@ describe("importIfc: ceilings (#59)", () => {
   ])("leaves a ceiling on the linked model when an indexed hole's segments %s", (_name, segments) => {
     const plan = holedPair(segments);
     expect(ofKind(plan.records, "ceiling")).toEqual([]);
-    expect(ceilingsLine(plan.report)).toEqual(linked("its shape is an outline with holes"));
+    expect(ceilingsLine(plan.report)).toEqual(linked("one of its holes couldn't be read (curved, or not a closed line)"));
   });
 
   it("reads an indexed outline the same way, for every kind: a floor", () => {
@@ -385,5 +387,46 @@ describe("importIfc: ceilings (#59)", () => {
     const [product] = readIfcSource(t.text(), { sourceId: "v1", label: "Other tool", disciplines: ["architecture"] }).products;
     expect([product?.predefinedType, product?.objectType]).toEqual(["USERDEFINED", "Acoustic baffle"]);
     expect(ofKind(read(t).records, "ceiling")).toEqual([]);
+  });
+
+  const SQ = [[0, 0], [4000, 0], [4000, 3000], [0, 3000]] as const;
+  const voids = (t: IfcText, holes: readonly (readonly (readonly [number, number])[])[]) => t.add("IFCARBITRARYPROFILEDEFWITHVOIDS", `.AREA.,$,#${polyline(t, SQ)},(${holes.map((h) => `#${polyline(t, h)}`).join(",")})`);
+
+  it.each([
+    ["wholly outside its outline", [[6000, 1000], [7000, 1000], [7000, 2000], [6000, 2000]], "one of its holes isn't inside its outline"],
+    ["straddling its outline's edge", [[3500, 1000], [4500, 1000], [4500, 2000], [3500, 2000]], "one of its holes isn't inside its outline"],
+    ["bigger than its outline", [[-1000, -1000], [9000, -1000], [9000, 9000], [-1000, 9000]], "one of its holes isn't inside its outline"],
+    ["under a square foot", [[1000, 1000], [1200, 1000], [1200, 1200], [1000, 1200]], "one of its holes covers almost nothing (under 1 sq ft)"],
+    ["that crosses itself", [[1000, 1000], [2000, 2000], [2000, 1000], [1000, 2000]], "one of its holes crosses itself"],
+  ] as const)("leaves a ceiling with a hole %s on the linked model: the ceiling commands would refuse it", (_name, hole, reason) => {
+    const t = IfcText.start();
+    t.storey("Level 1", 0);
+    board(t, voids(t, [hole]));
+    const plan = read(t);
+    expect(commandsTake(plan)).toBe("left on the linked model");
+    expect(ceilingsLine(plan.report)).toEqual(linked(reason));
+  });
+
+  it("takes a ceiling with a hole inside its outline as one the ceiling commands make, measured less the hole", () => {
+    const t = IfcText.start();
+    t.storey("Level 1", 0);
+    board(t, voids(t, [[[1000, 1000], [2000, 1000], [2000, 2000], [1000, 2000]]]));
+    const plan = read(t);
+    expect(commandsTake(plan)).toBe("a ceiling the commands make");
+    const landed = landImport(hostModel(), plan.records).model;
+    const [c] = ofKind(landed, "ceiling");
+    expect(c ? measureElement(landed.elements, c)?.values["qto.area"] : undefined).toBeCloseTo(11, 6);
+  });
+
+  it.each([
+    ["sloped", (t: IfcText) => [t.extrude(voids(t, [[[1000, 1000], [2000, 1000], [2000, 2000], [1000, 2000]]]), 20, t.axis3([0, 0, 2700], [0.2, 0, 1], [1, 0, -0.2]))]],
+    ["in two pieces", (t: IfcText) => [t.extrude(voids(t, [[[1000, 1000], [2000, 1000], [2000, 2000], [1000, 2000]]]), 20, t.axis3([0, 0, 2700])), t.extrude(t.polygon(SQ), 20, t.axis3([5000, 0, 2700]))]],
+  ] as const)("leaves a ceiling with a hole that is %s on the linked model for not being flat, not for its hole", (_name, pieces) => {
+    const t = IfcText.start();
+    t.storey("Level 1", 0);
+    t.product("Level 1", "IFCCOVERING", "Ceiling", [0, 0, 0], t.body(pieces(t)), ".CEILING.");
+    const plan = read(t);
+    expect(ofKind(plan.records, "ceiling")).toEqual([]);
+    expect(ceilingsLine(plan.report)).toEqual(linked("it isn't flat (sloped or shaped)"));
   });
 });

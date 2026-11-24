@@ -1,4 +1,4 @@
-import { cleanOutline, outlineFault, type OutlineFault } from "../spaces/space-geometry";
+import { cleanOutline, containsPoint, outlineFault, type OutlineFault } from "../spaces/space-geometry";
 import type { Vec2 } from "../types";
 
 /**
@@ -18,4 +18,13 @@ export interface CheckedOutline<Fault extends string = OutlineFault> {
 export function checkCeilingOutline(points: readonly Vec2[]): CheckedOutline {
   const outline = cleanOutline(points);
   return { outline, fault: outlineFault(outline) };
+}
+
+/** What is wrong with a hole: what is wrong with any outline, or that it reaches outside the ceiling. */
+export type HoleFault = OutlineFault | "outside";
+
+/** A hole as it is kept, and what stops it being one: not an outline, or not wholly inside the ceiling's own. */
+export function checkCeilingHole(points: readonly Vec2[], around: readonly Vec2[]): CheckedOutline<HoleFault> {
+  const { outline, fault } = checkCeilingOutline(points);
+  return { outline, fault: fault ?? (outline.every((p) => containsPoint(around, p)) ? null : "outside") };
 }
