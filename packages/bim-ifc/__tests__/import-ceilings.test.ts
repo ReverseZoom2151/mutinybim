@@ -242,4 +242,72 @@ describe("importIfc: ceilings (#59)", () => {
     expect(ofKind(over.records, "ceiling")).toEqual([]);
     expect(ceilingsLine(over.report)).toEqual(linked("its outline has 2001 corners, and a ceiling here takes 2000 at most"));
   });
+
+  /** An `IfcIndexedPolyCurve`: its points as stored, and the segments that say how the curve runs through them. */
+  const indexedCurve = (t: IfcText, points: readonly (readonly [number, number])[], segments: string | null): number =>
+    t.add("IFCINDEXEDPOLYCURVE", `#${t.add("IFCCARTESIANPOINTLIST2D", `(${points.map(([x, y]) => `(${x}.,${y}.)`).join(",")}),$`)},${segments ?? "$"},$`);
+  const polyline = (t: IfcText, points: readonly (readonly [number, number])[]) => t.add("IFCPOLYLINE", `(${[...points, points[0] ?? [0, 0]].map(([x, y]) => `#${t.pt(x, y)}`).join(",")})`);
+  /** The corners of a 1 m square hole, stored out of order: the curve runs 1, 3, 2, 4. */
+  const SHUFFLED: readonly (readonly [number, number])[] = [[1000, 1000], [2000, 2000], [2000, 1000], [1000, 2000]];
+  const SQUARE = [{ x: 1000, y: 1000 }, { x: 2000, y: 1000 }, { x: 2000, y: 2000 }, { x: 1000, y: 2000 }];
+  /** A ceiling and a floor, each 4 m x 3 m, each with the same hole. */
+  const holedPair = (segments: string | null) => {
+    const t = IfcText.start();
+    t.storey("Level 1", 0);
+    const profile = () => t.add("IFCARBITRARYPROFILEDEFWITHVOIDS", `.AREA.,$,#${polyline(t, [[0, 0], [4000, 0], [4000, 3000], [0, 3000]])},(#${indexedCurve(t, SHUFFLED, segments)})`);
+    board(t, profile());
+    return read(t);
+  };
+
+  it.each([
+    ["one segment through every point", "(IFCLINEINDEX((1,3,2,4,1)))"],
+    ["a segment for each edge", "(IFCLINEINDEX((1,3)),IFCLINEINDEX((3,2)),IFCLINEINDEX((2,4)),IFCLINEINDEX((4,1)))"],
+  ])("reads an indexed hole in the order its segments run, not the order its points are stored: %s", (_name, segments) => {
+    expect(ofKind(holedPair(segments).records, "ceiling").map((c) => c.holes)).toEqual([[SQUARE]]);
+  });
+
+  it("reads an indexed curve with no segments as a line through its points as stored", () => {
+    const stored = SHUFFLED.map(([x, y]) => ({ x, y }));
+    expect(ofKind(holedPair(null).records, "ceiling").map((c) => c.holes)).toEqual([[stored]]);
+  });
+
+  it.each([
+    ["don't run on from one another", "(IFCLINEINDEX((1,3)),IFCLINEINDEX((2,4)))"],
+    ["name a point that isn't there", "(IFCLINEINDEX((1,3,2,5,1)))"],
+    ["pass through a point twice", "(IFCLINEINDEX((1,3,2,3,4,1)))"],
+  ])("leaves a ceiling on the linked model when an indexed hole's segments %s", (_name, segments) => {
+    const plan = holedPair(segments);
+    expect(ofKind(plan.records, "ceiling")).toEqual([]);
+    expect(ceilingsLine(plan.report)).toEqual(linked("its shape is an outline with holes"));
+  });
+
+  it("reads an indexed outline the same way, for every kind: a floor", () => {
+    const floor = (segments: string) => {
+      const t = IfcText.start();
+      t.storey("Level 1", 0);
+      const profile = t.add("IFCARBITRARYCLOSEDPROFILEDEF", `.AREA.,$,#${indexedCurve(t, SHUFFLED, segments)}`);
+      t.product("Level 1", "IFCSLAB", "Floor", [0, 0, -250], t.body([t.extrude(profile, 250)]), ".FLOOR.");
+      return read(t);
+    };
+    expect(ofKind(floor("(IFCLINEINDEX((1,3,2,4,1)))").records, "slab").map((s) => s.outline)).toEqual([SQUARE]);
+    const broken = floor("(IFCLINEINDEX((1,3)),IFCLINEINDEX((2,4)))");
+    expect(ofKind(broken.records, "slab")).toEqual([]);
+    expect(broken.report.classes.flatMap((c) => c.linked.map((l) => l.reason))).toEqual(["its shape is an outline whose segments don't join up"]);
+  });
+
+  it("takes a hole of 2000 corners and leaves a ceiling whose hole has 2001 on the linked model", () => {
+    const ring = (n: number): (readonly [number, number])[] => Array.from({ length: n }, (_, i) => [Math.round(20000 + 10000 * Math.cos((2 * Math.PI * i) / n)), Math.round(20000 + 10000 * Math.sin((2 * Math.PI * i) / n))] as const);
+    const plan = (n: number) => {
+      const t = IfcText.start();
+      t.storey("Level 1", 0);
+      board(t, t.add("IFCARBITRARYPROFILEDEFWITHVOIDS", `.AREA.,$,#${polyline(t, [[0, 0], [40000, 0], [40000, 40000], [0, 40000]])},(#${polyline(t, ring(n))})`));
+      return read(t);
+    };
+    const most = plan(2000);
+    expect(ofKind(most.records, "ceiling").map((c) => c.holes?.map((h) => h.length))).toEqual([[2000]]);
+    expect(landImport(hostModel(), most.records).dropped).toEqual([]);
+    const over = plan(2001);
+    expect(ofKind(over.records, "ceiling")).toEqual([]);
+    expect(ceilingsLine(over.report)).toEqual(linked("one of its holes has 2001 corners, and a hole here takes 2000 at most"));
+  });
 });
