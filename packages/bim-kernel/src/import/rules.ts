@@ -1,7 +1,7 @@
 import { asElementId } from "../types";
 import { GLOBAL_PARTITION } from "../partition";
 import type { Beam, Column, Component, ElementId, Level, MepSystem, Opening, PartInstance, PartTypeElement, Room, RunDomain, RunSegment, RunSize, Slab, Wall } from "../types";
-import type { Ceiling } from "../ceilings/types";
+import { CEILING_HEIGHT_MAX_MM, CEILING_OUTLINE_MAX_POINTS, type Ceiling } from "../ceilings/types";
 import { RUN_DOMAINS } from "../routing/types";
 import { connectorDomainOf, sizeFitsDomain } from "../routing/rules";
 import { activeServiceRegistry } from "../services/registry";
@@ -79,7 +79,11 @@ const slab: ImportRuleDef = {
   },
 };
 
-/** A flat ceiling from one footprint pushed straight up: its underside is the ceiling, at its height above the level. */
+/**
+ * A flat ceiling from one footprint pushed straight up: its underside is the ceiling, at its height above the level.
+ * The footprint has to be the ceiling's true outline, in straight edges, and the ceiling one the ceiling commands
+ * would make; anything else stays on the linked model with the reason.
+ */
 const ceiling: ImportRuleDef = {
   id: "kernel.ceiling",
   label: "Flat ceilings",
@@ -89,9 +93,18 @@ const ceiling: ImportRuleDef = {
     if (typeof level === "string") return fail(level);
     const prism = verticalPrism(p.geometry);
     if (!prism) return fail(p.geometry.unread ? `its shape is ${p.geometry.unread}` : "it isn't flat (sloped or shaped)");
+    const [shape] = p.geometry.extrusions;
+    // A ceiling is its plan outline, so a footprint read only as a size or as a sampled circle isn't one to take.
+    if (shape?.circle) return fail("its outline is a circle, and a ceiling here has straight edges");
+    if (shape?.outerBound) return fail("its shape is a hollow or rolled section, and only the outside edge of those is read from the file");
     // An opening cut as its own element leaves the outline whole, so the outline alone would bring the ceiling in filled.
     if ((p.openings ?? 0) > 0) return fail("it has openings cut through it, and those aren't read from the file yet");
-    const record: Ceiling = { ...base(ctx, p, level), kind: "ceiling", levelId: level.id, outline: prism.outline.map(roundPlan), form: "flat", heightMm: round(prism.bottom - level.elevationMm) };
+    const outline = prism.outline.map(roundPlan);
+    if (outline.length > CEILING_OUTLINE_MAX_POINTS) return fail(`its outline has ${outline.length} corners, and a ceiling here takes ${CEILING_OUTLINE_MAX_POINTS} at most`);
+    const heightMm = round(prism.bottom - level.elevationMm);
+    if (!(heightMm > 0)) return fail("it sits at or below the floor of its level, and a ceiling here is above it");
+    if (heightMm > CEILING_HEIGHT_MAX_MM) return fail(`it is more than ${CEILING_HEIGHT_MAX_MM / 1000} m above its level, higher than a ceiling here can be`);
+    const record: Ceiling = { ...base(ctx, p, level), kind: "ceiling", levelId: level.id, outline, form: "flat", heightMm };
     return { ok: true, records: [record] };
   },
 };

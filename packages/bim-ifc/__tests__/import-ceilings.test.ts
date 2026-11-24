@@ -6,7 +6,9 @@
  * rule for the kind, so a reader said "Ceilings can't be edited here yet" and
  * left every one on the linked model. A ceiling's underside is now read as
  * its height above its level. One whose shape isn't a single flat outline
- * (holes, a slope written by another tool) stays linked, with the reason.
+ * (holes, a slope written by another tool, a hollow, rolled or round
+ * section) stays linked, with the reason, and so does one the ceiling
+ * commands would refuse (at or below its level's floor, too many corners).
  */
 import { DEFAULT_SETTINGS, asRevision, gatedRecordFeatures, landImport, type BimElement, type ModelState } from "@permitzip/bim-kernel";
 import { runScript, sliceModel, type ScriptDefinition } from "@permitzip/bim-script";
@@ -125,5 +127,71 @@ describe("importIfc: ceilings (#59)", () => {
 
     expect(back.of(first)).toBeUndefined();
     expect(ceilingsLine(back.report)).toEqual({ classId: "arch.ceiling", label: "Ceilings", converted: ceilings.length - 1, linked: [{ reason: "its shape is an outline with holes", count: 1 }] });
+  });
+
+  /** One ceiling board, 20 mm thick with its underside `z` above the storey, drawn from `profile`. */
+  const board = (t: IfcText, profile: number, z = 2700): number => t.product("Level 1", "IFCCOVERING", "Ceiling", [0, 0, 0], t.body([t.extrude(profile, 20, t.axis3([0, 0, z]))]), ".CEILING.");
+  const read = (t: IfcText, disciplines: readonly string[] = ["architecture"]) => importIfc(t.text(), { model: hostModel(), referenceId: "ref", sourceKey: "f", sourceId: "v1", label: "Other tool", disciplines: [...disciplines] });
+  const linked = (reason: string) => ({ classId: "arch.ceiling", label: "Ceilings", converted: 0, linked: [{ reason, count: 1 }] });
+
+  it("takes a plain rectangle section as the outline it is", () => {
+    const t = IfcText.start();
+    t.storey("Level 1", 0);
+    board(t, t.rect(4000, 3000, [2000, 1500]));
+    const plan = read(t);
+    expect(ofKind(plan.records, "ceiling").map((c) => c.outline)).toEqual([[{ x: 0, y: 0 }, { x: 4000, y: 0 }, { x: 4000, y: 3000 }, { x: 0, y: 3000 }]]);
+  });
+
+  it.each([
+    ["a hollow rectangle", (t: IfcText) => t.add("IFCRECTANGLEHOLLOWPROFILEDEF", `.AREA.,$,#${t.axis2([2000, 1500])},4000.,3000.,500.,$,$`), "its shape is a hollow or rolled section, and only the outside edge of those is read from the file"],
+    ["a hollow circle", (t: IfcText) => t.add("IFCCIRCLEHOLLOWPROFILEDEF", `.AREA.,$,#${t.axis2([2000, 2000])},2000.,500.`), "its outline is a circle, and a ceiling here has straight edges"],
+    ["a rounded rectangle", (t: IfcText) => t.add("IFCROUNDEDRECTANGLEPROFILEDEF", `.AREA.,$,#${t.axis2([2000, 1500])},4000.,3000.,400.`), "its shape is a hollow or rolled section, and only the outside edge of those is read from the file"],
+    ["a rolled I section", (t: IfcText) => t.add("IFCISHAPEPROFILEDEF", `.AREA.,$,#${t.axis2([2000, 1500])},4000.,3000.,100.,150.,$,$,$`), "its shape is a hollow or rolled section, and only the outside edge of those is read from the file"],
+    ["a circle", (t: IfcText) => t.circle(2000), "its outline is a circle, and a ceiling here has straight edges"],
+  ] as const)("leaves a ceiling drawn from %s on the linked model, and says why", (_name, profile, reason) => {
+    const t = IfcText.start();
+    t.storey("Level 1", 0);
+    board(t, profile(t));
+    const plan = read(t);
+    expect(ofKind(plan.records, "ceiling")).toEqual([]);
+    expect(ceilingsLine(plan.report)).toEqual(linked(reason));
+  });
+
+  it("still reads a hollow section by its size where that is what the kind is: a column", () => {
+    const t = IfcText.start();
+    t.storey("Level 1", 0);
+    const hollow = t.add("IFCRECTANGLEHOLLOWPROFILEDEF", `.AREA.,$,#${t.axis2([0, 0])},300.,300.,12.,$,$`);
+    t.product("Level 1", "IFCCOLUMN", "C1", [1000, 1000, 0], t.body([t.extrude(hollow, 3000)]), ".COLUMN.");
+    const plan = read(t, ["architecture", "structure"]);
+    expect(ofKind(plan.records, "column")).toHaveLength(1);
+  });
+
+  it.each([
+    ["below its level's floor", -500, "it sits at or below the floor of its level, and a ceiling here is above it"],
+    ["on its level's floor", 0, "it sits at or below the floor of its level, and a ceiling here is above it"],
+    ["higher than a ceiling can be", 100_000.1, "it is more than 100 m above its level, higher than a ceiling here can be"],
+  ] as const)("leaves a ceiling %s on the linked model: the ceiling commands would refuse it", (_name, z, reason) => {
+    const t = IfcText.start();
+    t.storey("Level 1", 0);
+    board(t, t.polygon([[0, 0], [4000, 0], [4000, 3000], [0, 3000]]), z);
+    const plan = read(t);
+    expect(ofKind(plan.records, "ceiling")).toEqual([]);
+    expect(ceilingsLine(plan.report)).toEqual(linked(reason));
+  });
+
+  it("takes an outline of 2000 corners and leaves one of 2001 on the linked model", () => {
+    const ring = (n: number): (readonly [number, number])[] => Array.from({ length: n }, (_, i) => [Math.round(20000 * Math.cos((2 * Math.PI * i) / n)), Math.round(20000 * Math.sin((2 * Math.PI * i) / n))] as const);
+    const plan = (n: number) => {
+      const t = IfcText.start();
+      t.storey("Level 1", 0);
+      board(t, t.polygon(ring(n)));
+      return read(t);
+    };
+    const most = plan(2000);
+    expect(ofKind(most.records, "ceiling").map((c) => c.outline.length)).toEqual([2000]);
+    expect(landImport(hostModel(), most.records).dropped).toEqual([]);
+    const over = plan(2001);
+    expect(ofKind(over.records, "ceiling")).toEqual([]);
+    expect(ceilingsLine(over.report)).toEqual(linked("its outline has 2001 corners, and a ceiling here takes 2000 at most"));
   });
 });

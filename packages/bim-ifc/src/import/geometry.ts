@@ -170,6 +170,7 @@ export class GeometryReader {
           along,
           ...(profile.circle ? { circle: { centre: apply(local, { x: profile.circle.cx, y: profile.circle.cy, z: 0 }), radius: profile.circle.r } } : {}),
           ...(profile.rectangle ? { rectangle: profile.rectangle } : {}),
+          ...(profile.outerBound ? { outerBound: true as const } : {}),
         };
         out.extrusions.push(extrusion);
         for (const p of base) out.points.push(p, add(p, along));
@@ -251,8 +252,11 @@ export class GeometryReader {
     return { o, x: mul(x, k), y: mul(y, k), z: mul(z, k) };
   }
 
-  /** A profile in its own plane: points (closed, in order), and whether it is a rectangle or a circle. */
-  profile(t: StepToken | undefined): { points: { x: number; y: number }[]; rectangle?: { x: number; y: number }; circle?: { cx: number; cy: number; r: number }; unread?: string } | null {
+  /**
+   * A profile in its own plane: points (closed, in order), and whether it is a rectangle or a circle. `outerBound`:
+   * the points are only the profile's outer bound (a hollow section, a rounded rectangle, a rolled shape as its box).
+   */
+  profile(t: StepToken | undefined): { points: { x: number; y: number }[]; rectangle?: { x: number; y: number }; circle?: { cx: number; cy: number; r: number }; outerBound?: true; unread?: string } | null {
     const e = this.entity(t);
     if (!e) return null;
     const pos = this.axis2(e.args[2]);
@@ -262,7 +266,12 @@ export class GeometryReader {
     };
     const rect = (xd: number, yd: number) => ({ points: [at(-xd / 2, -yd / 2), at(xd / 2, -yd / 2), at(xd / 2, yd / 2), at(-xd / 2, yd / 2)], rectangle: { x: xd, y: yd } });
     switch (e.type) {
-      case "IFCRECTANGLEPROFILEDEF":
+      case "IFCRECTANGLEPROFILEDEF": {
+        const a = (this.num(e.args[3]) ?? 0) * this.scale;
+        const b = (this.num(e.args[4]) ?? 0) * this.scale;
+        return a > 0 && b > 0 ? rect(a, b) : null;
+      }
+      // The box around the section: its size, not its outline.
       case "IFCRECTANGLEHOLLOWPROFILEDEF":
       case "IFCROUNDEDRECTANGLEPROFILEDEF":
       case "IFCISHAPEPROFILEDEF":
@@ -273,7 +282,7 @@ export class GeometryReader {
       case "IFCZSHAPEPROFILEDEF": {
         const a = (this.num(e.args[3]) ?? 0) * this.scale;
         const b = (this.num(e.args[4]) ?? 0) * this.scale;
-        return a > 0 && b > 0 ? rect(a, b) : null;
+        return a > 0 && b > 0 ? { ...rect(a, b), outerBound: true } : null;
       }
       case "IFCCIRCLEPROFILEDEF":
       case "IFCCIRCLEHOLLOWPROFILEDEF": {
@@ -281,7 +290,7 @@ export class GeometryReader {
         if (!(r > 0)) return null;
         const points = Array.from({ length: 16 }, (_, i) => at(r * Math.cos((i * Math.PI) / 8), r * Math.sin((i * Math.PI) / 8)));
         const c = at(0, 0);
-        return { points, circle: { cx: c.x, cy: c.y, r } };
+        return { points, circle: { cx: c.x, cy: c.y, r }, ...(e.type === "IFCCIRCLEHOLLOWPROFILEDEF" ? { outerBound: true as const } : {}) };
       }
       case "IFCARBITRARYCLOSEDPROFILEDEF":
       case "IFCARBITRARYPROFILEDEFWITHVOIDS": {
