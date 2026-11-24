@@ -24,6 +24,13 @@ const typeNameOf = (p: ImportProduct, fallback: string): string => (p.typeName?.
 /** To 0.1 mm; a rounded-away negative reads 0, never -0. */
 const round = (n: number): number => Math.round(n * 10) / 10 + 0;
 
+/**
+ * To 0.1 mm, steadily: float noise is taken out first (to a millionth of a millimetre), so one length read through
+ * differently turned frames rounds the same way every time. Plain `round` tips either side of a half on that noise:
+ * 300.05 read as 300.04999999999995 gives 300, and as 300.05000000000007 gives 300.1.
+ */
+const steady = (n: number): number => (Math.sign(n) * Math.round(Math.round(Math.abs(n) * 1e6) / 1e5)) / 10 + 0;
+
 function base(ctx: ImportRuleContext, p: ImportProduct, level: Level, suffix?: string) {
   const values = ctx.values(p);
   return {
@@ -335,9 +342,10 @@ const part: ImportRuleDef = {
     const b = p.geometry.bounds;
     if (!b) return fail(p.geometry.unread ? `its shape is ${p.geometry.unread}` : "its size couldn't be read");
     const seat = partSeat(p, b);
-    const size = { x: round(seat.box.max.x - seat.box.min.x), y: round(seat.box.max.y - seat.box.min.y), z: round(seat.box.max.z - seat.box.min.z) };
+    // The box is what products of one file type are matched on, so it is rounded steadily: the same box must give the same numbers at any turn.
+    const size = { x: steady(seat.box.max.x - seat.box.min.x), y: steady(seat.box.max.y - seat.box.min.y), z: steady(seat.box.max.z - seat.box.min.z) };
     if (size.x < 1 || size.y < 1 || size.z < 1) return fail("it has no size");
-    const centre = { x: round((seat.box.min.x + seat.box.max.x) / 2), y: round((seat.box.min.y + seat.box.max.y) / 2), z: round((seat.box.min.z + seat.box.max.z) / 2) };
+    const centre = { x: steady((seat.box.min.x + seat.box.max.x) / 2), y: steady((seat.box.min.y + seat.box.max.y) / 2), z: steady((seat.box.min.z + seat.box.max.z) / 2) };
     const typeName = typeNameOf(p, nameOf(p));
     // A part type's box hangs off its own point, so products share one only while their boxes sit the same way from theirs.
     const boxKey = `${size.x}x${size.y}x${size.z}@${centre.x},${centre.y},${centre.z}`;

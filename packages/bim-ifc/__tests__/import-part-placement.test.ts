@@ -204,6 +204,26 @@ describe("importIfc reads a part's placement from any file (#65)", () => {
     expect(plan.report.notes).toEqual(["SD-1: its insertion point is away from its shape in the file, so it sits at the middle of its box, not turned"]);
   });
 
+  it.each([
+    ["a metric box that hangs off its point by an odd tenth", 600.1, 400, 300.05, 200],
+    ["a half-inch-thick plate with its point on one face", 609.6, 12.7, 304.8, 6.35],
+  ])("one file type keeps one part type at every turn: %s", (_name, width, depth, cx, cy) => {
+    // The box's centre is at a rounding half (300.05, 6.35), where float noise from each turned frame could tip it either way.
+    const turns = [0, 30, 37, 53, 90, 123, 180, 271];
+    const { plan, part, bounds, records } = foreign((t) => {
+      const ids = turns.map((deg, i) => {
+        const a = (deg * Math.PI) / 180;
+        return placed(t, `SD-${deg}`, [1000 + i * 2000, 4000, 2700], t.body([t.extrude(t.rect(width, depth, [cx, cy]), 300)]), { x: [Math.cos(a), Math.sin(a), 0] });
+      });
+      t.type("IFCAIRTERMINALTYPE", "Diffuser", ids, "DIFFUSER");
+    });
+    expect(ofKind(plan.records, "part_type")).toHaveLength(1);
+    expect(new Set(turns.map((deg) => part(`SD-${deg}`).typeId)).size).toBe(1);
+    expect(turns.map((deg) => part(`SD-${deg}`).rotationDeg)).toEqual(turns);
+    for (const deg of turns) expectSameBox(worldBox(records, part(`SD-${deg}`)), bounds(`SD-${deg}`));
+    expect(plan.report.notes).toEqual([]);
+  });
+
   it("two upright parts of one file type whose boxes sit differently each keep their own box", () => {
     const { plan, part, bounds, records } = foreign((t) => {
       // The same 600 x 400 x 300 box: centred on SD-1's insertion point, and off SD-2's by (300, 200).
