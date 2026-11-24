@@ -1,10 +1,12 @@
 import { asElementId } from "../types";
 import { GLOBAL_PARTITION } from "../partition";
 import type { Beam, Column, Component, ElementId, Level, MepSystem, Opening, PartInstance, PartTypeElement, Room, RunDomain, RunSegment, RunSize, Slab, Wall } from "../types";
+import { checkCeilingOutline } from "../ceilings/outline";
 import { CEILING_HEIGHT_MAX_MM, CEILING_HOLES_MAX, CEILING_OUTLINE_MAX_POINTS, type Ceiling } from "../ceilings/types";
 import { RUN_DOMAINS } from "../routing/types";
 import { connectorDomainOf, sizeFitsDomain } from "../routing/rules";
 import { activeServiceRegistry } from "../services/registry";
+import type { OutlineFault } from "../spaces/space-geometry";
 import { PART_CATEGORIES, type PartCategory, type PartTypeDefinition } from "../parts";
 import type { ImportRuleContext, ImportRuleDef } from "./rule-point";
 import { axisAligned, holedPrism, outlineArea, outlineCentre, rectangleAxis, roundPlan, straightSweep, verticalPrism } from "./shape";
@@ -79,6 +81,14 @@ const slab: ImportRuleDef = {
   },
 };
 
+/** What is wrong with an outline the commands refuse, to follow "its outline". */
+const OUTLINE_FAULTS: Readonly<Record<OutlineFault, string>> = {
+  too_few_corners: "has fewer than 3 corners",
+  not_a_number: "has a corner that isn't a number",
+  crosses_itself: "crosses itself",
+  too_small: "covers almost nothing (under 1 sq ft)",
+};
+
 /**
  * A flat ceiling from one footprint pushed straight up, less the holes cut through it: its underside is the ceiling,
  * at its height above the level. The footprint has to be the ceiling's true outline, in straight edges, and the
@@ -99,8 +109,11 @@ const ceiling: ImportRuleDef = {
     if (shape?.outerBound) return fail("its shape is a hollow or rolled section, and only the outside edge of those is read from the file");
     // An opening cut as its own element leaves the outline whole, so the outline alone would bring the ceiling in filled.
     if ((p.openings ?? 0) > 0) return fail("it has openings cut through it, and those aren't read from the file yet");
-    const outline = prism.outline.map(roundPlan);
-    if (outline.length > CEILING_OUTLINE_MAX_POINTS) return fail(`its outline has ${outline.length} corners, and a ceiling here takes ${CEILING_OUTLINE_MAX_POINTS} at most`);
+    const drawn = prism.outline.map(roundPlan);
+    if (drawn.length > CEILING_OUTLINE_MAX_POINTS) return fail(`its outline has ${drawn.length} corners, and a ceiling here takes ${CEILING_OUTLINE_MAX_POINTS} at most`);
+    // The same checks the ceiling commands run, so what comes in is a ceiling they would make.
+    const { outline, fault } = checkCeilingOutline(drawn);
+    if (fault) return fail(`its outline ${OUTLINE_FAULTS[fault]}`);
     if (prism.holes.length > CEILING_HOLES_MAX) return fail(`it has ${prism.holes.length} holes, and a ceiling here takes ${CEILING_HOLES_MAX} at most`);
     const holes = prism.holes.map((hole) => hole.map(roundPlan));
     const most = holes.reduce((n, hole) => Math.max(n, hole.length), 0);
