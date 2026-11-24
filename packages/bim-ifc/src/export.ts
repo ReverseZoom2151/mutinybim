@@ -1018,7 +1018,8 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     const source = products.get(link.source.elementId);
     if (source) {
       bag.set("MutinyBIM_Circuit", { kind: "text", name: "Source", value: source.guid });
-      bag.set("MutinyBIM_Circuit", { kind: "text", name: "SourcePort", value: link.source.port });
+      // The source's own name for its output (a board's bus), not an IfcDistributionPort: left out when a stored link has none.
+      if (typeof link.source.port === "string" && link.source.port !== "") bag.set("MutinyBIM_Circuit", { kind: "text", name: "SourcePort", value: link.source.port });
     }
     const cls = primaryClass(registry, index, link);
     for (const field of cls && fields.getClass(cls.id) ? fields.fieldsFor(cls.id) : []) {

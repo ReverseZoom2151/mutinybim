@@ -274,6 +274,26 @@ describe("electrical-room", () => {
     }
   });
 
+  it("a stored circuit with no source port still exports, with the source and no port", async () => {
+    const model = await build(electricalRoom);
+    const elements = Object.fromEntries(
+      Object.entries(model.elements).map(([id, e]) => {
+        const source: unknown = Reflect.get(e, "source");
+        if (e.kind !== "service_link" || !source || typeof source !== "object") return [id, e];
+        const { port: _port, ...rest } = source as Record<string, unknown>;
+        return [id, { ...e, source: rest }];
+      }),
+    ) as typeof model.elements;
+    const output = exported({ ...model, elements });
+    const circuits = ofType(output, "IFCDISTRIBUTIONCIRCUIT");
+    expect(circuits).toHaveLength(2);
+    for (const circuit of circuits) {
+      const set = psets(output, circuit).MutinyBIM_Circuit ?? {};
+      expect(Object.keys(set)).toContain("Source");
+      expect(Object.keys(set)).not.toContain("SourcePort");
+    }
+  });
+
   it("writes one circuit per room, each grouping the board, and every outlet in one", () => {
     const circuits = ofType(file, "IFCDISTRIBUTIONCIRCUIT");
     expect(circuits.map((c) => text(c, 2)).sort()).toEqual(["Bedroom receptacles", "Living room receptacles"]);
