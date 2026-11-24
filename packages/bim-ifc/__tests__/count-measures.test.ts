@@ -48,6 +48,26 @@ describe("counts in IFC 4.3", () => {
     expect(lines.some((l) => l.includes("IFCCOUNTMEASURE") || l.startsWith("IFCQUANTITYCOUNT"))).toBe(false);
   });
 
+  it.each([1e21, 1e22, 1.5e300])("writes a count of %p, too large to be exact, as a STEP real", (value) => {
+    const lines = written((bag) => {
+      bag.set("Pset_Test", { kind: "number", name: "Occupants", value, unit: "ea" });
+      bag.quantity("Qto_Test", { kind: "number", name: "Count", value, unit: "ea" });
+    });
+    // Never JavaScript's own exponent form (1e+21), which is neither a STEP integer nor a STEP real.
+    for (const line of lines) expect(line).not.toMatch(/\de\+?\d/);
+    expect(lines.some((l) => l.includes("IFCCOUNTMEASURE") || l.startsWith("IFCQUANTITYCOUNT"))).toBe(false);
+    expect(lines.filter((l) => l.startsWith("IFCPROPERTYSINGLEVALUE('Occupants',$,IFCREAL(") || l.startsWith("IFCQUANTITYNUMBER('Count',"))).toHaveLength(2);
+  });
+
+  it("writes a negative count as a number, since a quantity count can't be below zero", () => {
+    const lines = written((bag) => {
+      bag.set("Pset_Test", { kind: "number", name: "Change", value: -2, unit: "ea" });
+      bag.quantity("Qto_Test", { kind: "number", name: "Count", value: -2, unit: "ea" });
+    });
+    expect(lines).toContain("IFCPROPERTYSINGLEVALUE('Change',$,IFCCOUNTMEASURE(-2),$)");
+    expect(lines).toContain("IFCQUANTITYNUMBER('Count',$,$,-2.,$)");
+  });
+
   it("leaves every other measure a real, with its decimal point", () => {
     const lines = written((bag) => {
       bag.set("Pset_Test", { kind: "number", name: "Rating", value: 20, unit: "A" });

@@ -122,11 +122,11 @@ const COUNT_MEASURE = "IFCCOUNTMEASURE";
 /**
  * A count as the whole number it is, or null when it isn't one. IfcCountMeasure is an INTEGER in IFC 4.3 (it was a
  * number in IFC 4), so a count is written without a decimal point, and one that isn't whole can't be written as a
- * count at all.
+ * count at all. Nor can one too large to be exact (past 2^53): it is written as the real it is.
  */
 function wholeCount(value: number): number | null {
   const whole = Math.round(value);
-  return Math.abs(value - whole) < 1e-9 ? whole + 0 : null;
+  return Number.isSafeInteger(whole) && Math.abs(value - whole) < 1e-9 ? whole + 0 : null;
 }
 
 function nominal(units: UnitSet, input: PropertyInput): StepValue {
@@ -163,9 +163,10 @@ function quantityEntity(g: StepGraph, units: UnitSet, q: PropertyInput & { reado
   const known = QUANTITY_OF_MEASURE[m.measure];
   units.note(m.unitType);
   if (known && m.measure !== COUNT_MEASURE) return g.add(known.entity, [str(q.name), $, $, real(m.value), $]);
-  // IfcQuantityCount's value is an integer; a count that isn't whole is written as a number below instead of being rounded.
+  // IfcQuantityCount's value is an integer, and not below zero; a count that isn't whole is written as a number below
+  // instead of being rounded, and so is a negative one.
   const whole = known ? wholeCount(m.value) : null;
-  if (known && whole !== null) return g.add(known.entity, [str(q.name), $, $, int(whole), $]);
+  if (known && whole !== null && whole >= 0) return g.add(known.entity, [str(q.name), $, $, int(whole), $]);
   // IfcQuantityNumber (new in 4.3): a code's own units (fixture units) and any other number, in the project unit of its type.
   return g.add("IFCQUANTITYNUMBER", [str(q.name), $, $, real(m.value), $]);
 }
