@@ -4,10 +4,11 @@ import { finish, guard, refuse, type AuthoredWrite, type ExecuteResult } from ".
 import { REGISTRY_ID_MAX_LENGTH, REGISTRY_ID_PATTERN } from "../ids";
 import { TrackedReader } from "../model";
 import { activeClassRegistry } from "../registry";
-import { cleanOutline, containsPoint, outlineAreaMm2, outlineProblem, MM2_PER_M2 } from "../spaces/space-geometry";
+import { containsPoint, outlineAreaMm2, outlineProblem, MM2_PER_M2 } from "../spaces/space-geometry";
 import { draftElements } from "../store";
 import { asElementId, type BimElement, type ElementId, type Level, type ModelState, type Partition, type Vec2 } from "../types";
 import { CEILING_CLASS_ID, CEILINGS_NOT_YET, ceilingsWritable } from "./feature";
+import { checkCeilingOutline } from "./outline";
 import { ceilingForm, ceilingLabel, ceilingSlope, defaultRoleForForm, isCeiling, surfaceRoles } from "./read";
 import { ceilingStructureProblem, ftIn } from "./structure";
 import { CEILING_HEIGHT_MAX_MM, CEILING_HOLES_MAX, CEILING_OUTLINE_MAX_POINTS, KNOWN_CEILING_FORMS, type Ceiling, type CeilingForm, type CeilingGrid, type CeilingSlope } from "./types";
@@ -184,8 +185,8 @@ function requireSpaceOn(e: Edit, spaceId: string, levelId: ElementId): ElementId
 }
 
 function cleanedOutline(points: readonly Vec2[], what: string): Vec2[] {
-  const o = cleanOutline(points);
-  const problem = outlineProblem(o);
+  const { outline: o, fault } = checkCeilingOutline(points);
+  const problem = fault ? outlineProblem(o) : null;
   if (problem) refuse("invalid_value", problem.replace(/^A space needs/, `A ${what} needs`).replace("around the space", `around the ${what}`).replace("encloses almost no floor", "covers almost nothing"));
   return o;
 }

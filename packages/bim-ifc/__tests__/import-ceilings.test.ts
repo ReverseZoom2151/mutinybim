@@ -13,7 +13,7 @@
 import { DEFAULT_SETTINGS, asRevision, gatedRecordFeatures, landImport, type BimElement, type ModelState } from "@permitzip/bim-kernel";
 import { runScript, sliceModel, type ScriptDefinition } from "@permitzip/bim-script";
 import { PROTOCOL_FEATURES } from "@permitzip/bim-sync";
-import { exportIfc, importIfc } from "../src";
+import { exportIfc, importIfc, readIfcSource } from "../src";
 import { Log } from "../../bim-kernel/__tests__/a13a-fixtures";
 import smallOffice from "../../bim-script/examples/small-office";
 import { IfcText, hostModel } from "./i9-fixtures";
@@ -193,5 +193,81 @@ describe("importIfc: ceilings (#59)", () => {
     const over = plan(2001);
     expect(ofKind(over.records, "ceiling")).toEqual([]);
     expect(ceilingsLine(over.report)).toEqual(linked("its outline has 2001 corners, and a ceiling here takes 2000 at most"));
+  });
+
+  /** Whether the ceiling commands take the very ceiling the import made, and what they say when they don't. */
+  const commandsTake = (plan: ReturnType<typeof read>): string => {
+    const [c] = ofKind(plan.records, "ceiling");
+    if (!c) return "left on the linked model";
+    const made = new Log(landImport(hostModel(), plan.records).model).submit({ type: "create_ceiling", ceilings: [{ ceilingId: "again", levelId: c.levelId, outline: c.outline, ...(c.holes ? { holes: c.holes } : {}), heightMm: c.heightMm }] });
+    return made.ok ? "a ceiling the commands make" : `imported, but create_ceiling refuses it: ${made.message}`;
+  };
+
+  it.each([
+    ["crosses itself (a bow tie)", [[0, 0], [4000, 3000], [4000, 0], [0, 3000]], "its outline crosses itself"],
+    ["has no area (three points in a line)", [[0, 0], [4000, 0], [8000, 0]], "its outline covers almost nothing (under 1 sq ft)"],
+    ["is under a square foot", [[0, 0], [200, 0], [200, 300], [0, 300]], "its outline covers almost nothing (under 1 sq ft)"],
+  ] as const)("leaves a ceiling whose outline %s on the linked model: the ceiling commands would refuse it", (_name, outer, reason) => {
+    const t = IfcText.start();
+    t.storey("Level 1", 0);
+    board(t, t.polygon(outer));
+    const plan = read(t);
+    expect(commandsTake(plan)).toBe("left on the linked model");
+    expect(ceilingsLine(plan.report)).toEqual(linked(reason));
+  });
+
+  it("takes a ceiling whose outline repeats a corner as the outline the ceiling commands keep", () => {
+    const t = IfcText.start();
+    t.storey("Level 1", 0);
+    board(t, t.polygon([[0, 0], [4000, 0], [4000, 0], [4000, 3000], [0, 3000]]));
+    const plan = read(t);
+    expect(ofKind(plan.records, "ceiling").map((c) => c.outline)).toEqual([[{ x: 0, y: 0 }, { x: 4000, y: 0 }, { x: 4000, y: 3000 }, { x: 0, y: 3000 }]]);
+    expect(commandsTake(plan)).toBe("a ceiling the commands make");
+  });
+
+  it.each([
+    ["FLOORING", 0, 15],
+    ["ROOFING", 3000, 150],
+    ["INSULATION", 2750, 100],
+  ] as const)("doesn't take a covering whose type says %s (its own predefined type unset) as a ceiling", (typed, z, thick) => {
+    const t = IfcText.start();
+    t.storey("Level 1", 0);
+    const id = t.product("Level 1", "IFCCOVERING", `${typed} piece`, [0, 0, 100], t.body([t.extrude(t.polygon([[0, 0], [4000, 0], [4000, 3000], [0, 3000]]), thick, t.axis3([0, 0, z]))]), "$");
+    t.type("IFCCOVERINGTYPE", `${typed} type`, [id], typed);
+    const plan = read(t);
+    expect(ofKind(plan.records, "ceiling")).toEqual([]);
+    expect(ceilingsLine(plan.report)).toBeUndefined();
+  });
+
+  it.each([
+    ["unset", "$"],
+    ["NOTDEFINED", ".NOTDEFINED."],
+  ] as const)("takes a covering whose own predefined type is %s and whose type says CEILING as a ceiling", (_name, own) => {
+    const t = IfcText.start();
+    t.storey("Level 1", 0);
+    const id = t.product("Level 1", "IFCCOVERING", "Board", [0, 0, 0], t.body([t.extrude(t.polygon([[0, 0], [4000, 0], [4000, 3000], [0, 3000]]), 20, t.axis3([0, 0, 2700]))]), own);
+    t.type("IFCCOVERINGTYPE", "Board type", [id], "CEILING");
+    const plan = read(t);
+    expect(ofKind(plan.records, "ceiling")).toHaveLength(1);
+    expect(ceilingsLine(plan.report)).toEqual({ classId: "arch.ceiling", label: "Ceilings", converted: 1, linked: [] });
+  });
+
+  it("keeps a covering's own predefined type over its type's", () => {
+    const t = IfcText.start();
+    t.storey("Level 1", 0);
+    const id = t.product("Level 1", "IFCCOVERING", "Board", [0, 0, 0], t.body([t.extrude(t.polygon([[0, 0], [4000, 0], [4000, 3000], [0, 3000]]), 20, t.axis3([0, 0, 2700]))]), ".CEILING.");
+    t.type("IFCCOVERINGTYPE", "Mislabelled type", [id], "FLOORING");
+    expect(ofKind(read(t).records, "ceiling")).toHaveLength(1);
+  });
+
+  it("reads a kind named only on the type (USERDEFINED and its ElementType) as the product's own", () => {
+    const t = IfcText.start();
+    t.storey("Level 1", 0);
+    const id = t.product("Level 1", "IFCCOVERING", "Baffle", [0, 0, 0], t.body([t.extrude(t.polygon([[0, 0], [4000, 0], [4000, 3000], [0, 3000]]), 20, t.axis3([0, 0, 2700]))]), "$");
+    const type = t.add("IFCCOVERINGTYPE", `${t.guid()},$,'Baffle type',$,$,$,$,$,'Acoustic baffle',.USERDEFINED.`);
+    t.add("IFCRELDEFINESBYTYPE", `${t.guid()},$,$,$,(#${id}),#${type}`);
+    const [product] = readIfcSource(t.text(), { sourceId: "v1", label: "Other tool", disciplines: ["architecture"] }).products;
+    expect([product?.predefinedType, product?.objectType]).toEqual(["USERDEFINED", "Acoustic baffle"]);
+    expect(ofKind(read(t).records, "ceiling")).toEqual([]);
   });
 });

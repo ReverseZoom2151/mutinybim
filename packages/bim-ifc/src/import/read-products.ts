@@ -109,6 +109,20 @@ function siScale(u: ReadEntity): number {
 }
 
 /** The attribute index of a named own attribute after the 8-attribute element prefix (null when the entity doesn't have it). */
+/** A predefined type that says nothing: left out, or NOTDEFINED. */
+const unset = (predefined: string | null): boolean => predefined === null || predefined === "NOTDEFINED";
+
+/** Where a type object's own attributes start: after the shared prefix and its ElementType. */
+const TYPE_OWN_START = 9;
+
+/** The PredefinedType of a product's type object, or null when the type has none (an IFC2X3 style, a property-only type). */
+function typePredefined(type: ReadEntity | undefined): string | null {
+  if (!type || !type.type.endsWith("TYPE")) return null;
+  const name = ifcEntityName(type.type);
+  const i = name ? ownAttributes(name).indexOf("PredefinedType") : -1;
+  return i >= 0 ? enumOf(type.args[TYPE_OWN_START + i]) : null;
+}
+
 function ownIndex(entity: string, name: string): number | null {
   // Only element entities share the 8-attribute prefix; a space or a grid doesn't.
   if (!ifcEntityName(entity)) return null;
@@ -284,11 +298,15 @@ export function readIfcSource(text: string, opts: IfcReadOptions): ImportSource 
     });
     const hostId = filledHost.get(e.id);
     const openings = openingsIn.get(e.id) ?? 0;
+    // What a product is may be said once, on its type: its own PredefinedType wins, and the type's fills in when it is unset.
+    const own = predefinedIndex !== null ? enumOf(e.args[predefinedIndex]) : null;
+    const typed = unset(own) ? typePredefined(type) : null;
     products.push({
       sourceId,
       entity,
-      predefinedType: predefinedIndex !== null ? enumOf(e.args[predefinedIndex]) : null,
-      objectType: str(e.args[4]),
+      predefinedType: unset(typed) ? own : typed,
+      // A user-defined kind named on the type is named in the type's ElementType.
+      objectType: str(e.args[4]) ?? (typed === "USERDEFINED" ? str(type?.args[TYPE_OWN_START - 1]) : null),
       name: str(e.args[2]),
       longName: spatial ? str(e.args[7]) : null,
       tag: spatial ? null : str(e.args[7]),
