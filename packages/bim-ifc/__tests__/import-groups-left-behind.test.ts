@@ -46,8 +46,10 @@ describe("groups the import leaves behind are named in its report", () => {
     expect(ofKind(Object.values(model.elements), "service_link")).toHaveLength(2);
     const { report } = readBack(model);
     expect(report.notes[0]).toBe("2 circuits and feeders weren't brought in (Bedroom receptacles and Living room receptacles); anything in them that converted came in on its own, so set them up again by hand");
-    // The parts themselves still came in: the note is about the grouping, not about them.
-    expect(report.summary).toBe("Converted 11 receptacles, 5 walls and 1 electrical equipment. Left 2 spaces as the linked model.");
+    // The parts themselves still came in: the note is about the grouping, not about them. (Only the circuits' own
+    // members are checked, so this doesn't break when another kind in the room starts to come in.)
+    const converted = Object.fromEntries(report.classes.map((c) => [c.label, c.converted]));
+    expect(converted).toMatchObject({ Receptacles: 11, "Electrical equipment": 1 });
   });
 
   it("a system whose runs converted isn't named; one nothing came from is", () => {
