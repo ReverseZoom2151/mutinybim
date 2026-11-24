@@ -163,7 +163,12 @@ export function readIfcSource(text: string, opts: IfcReadOptions): ImportSource 
   const psetsOf = new Map<number, number[]>();
   for (const r of all("IFCRELDEFINESBYPROPERTIES")) for (const o of refs(r.args[4])) psetsOf.set(o, [...(psetsOf.get(o) ?? []), ...refs(r.args[5])]);
   const voidHost = new Map<number, number>();
-  for (const r of all("IFCRELVOIDSELEMENT")) voidHost.set(refs(r.args[5])[0] ?? -1, refs(r.args[4])[0] ?? -1);
+  const openingsIn = new Map<number, number>();
+  for (const r of all("IFCRELVOIDSELEMENT")) {
+    const host = refs(r.args[4])[0] ?? -1;
+    voidHost.set(refs(r.args[5])[0] ?? -1, host);
+    openingsIn.set(host, (openingsIn.get(host) ?? 0) + 1);
+  }
   const filledHost = new Map<number, number>();
   for (const r of all("IFCRELFILLSELEMENT")) {
     const opening = refs(r.args[4])[0] ?? -1;
@@ -278,6 +283,7 @@ export function readIfcSource(text: string, opts: IfcReadOptions): ImportSource 
       return [{ id, name: str(port.args[2]), position: at, flow: enumOf(port.args[7]), connectedTo: (joined.get(pid) ?? []).flatMap((j) => gid(j) ?? []) }];
     });
     const hostId = filledHost.get(e.id);
+    const openings = openingsIn.get(e.id) ?? 0;
     products.push({
       sourceId,
       entity,
@@ -290,6 +296,7 @@ export function readIfcSource(text: string, opts: IfcReadOptions): ImportSource 
       typeId: type ? globalIdOf(type) : null,
       typeName: type ? str(type.args[2]) : null,
       hostId: hostId !== undefined ? gid(hostId) : null,
+      ...(openings > 0 ? { openings } : {}),
       groupIds: groupsOf.get(e.id) ?? [],
       geometry: { extrusions: shape.extrusions, bounds: boundsOf(shape.points), unread: shape.unread },
       properties: properties(e.id, type),

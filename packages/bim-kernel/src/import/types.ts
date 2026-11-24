@@ -62,6 +62,8 @@ export interface ImportProduct {
   readonly typeName: string | null;
   /** The element whose opening it fills (doors, windows). */
   readonly hostId: string | null;
+  /** How many openings the file cuts through it as separate elements (not as holes in its own outline). Absent: none. */
+  readonly openings?: number;
   /** Groups it is assigned to (distribution systems), by `sourceId`. */
   readonly groupIds: readonly string[];
   readonly geometry: ImportGeometry;

@@ -91,6 +91,29 @@ describe("importIfc: ceilings (#59)", () => {
     expect(got?.outline).toEqual([{ x: 1000, y: 500 }, { x: 5000, y: 500 }, { x: 5000, y: 3500 }, { x: 1000, y: 3500 }]);
   });
 
+  it("leaves a ceiling cut by an opening element on the linked model, and says why", () => {
+    const build = (cut: boolean) => {
+      const t = IfcText.start();
+      t.storey("Level 1", 0);
+      // A 4 m x 3 m board; the opening is a separate element joined to it, so the board's own outline has no hole.
+      const board = t.product("Level 1", "IFCCOVERING", "Ceiling", [0, 0, 0], t.body([t.extrude(t.polygon([[0, 0], [4000, 0], [4000, 3000], [0, 3000]]), 20, t.axis3([0, 0, 2700]))]), ".CEILING.");
+      if (cut) {
+        const hole = t.body([t.extrude(t.rect(1000, 1000), 20, t.axis3([0, 0, 2700]))]);
+        const opening = t.add("IFCOPENINGELEMENT", `${t.guid()},$,'Opening',$,$,#${t.place(t.storeyPlacements.get("Level 1") ?? null, t.axis3([2000, 1500, 0]))},#${hole},$,.OPENING.`);
+        t.add("IFCRELVOIDSELEMENT", `${t.guid()},$,$,$,#${board},#${opening}`);
+      }
+      return importIfc(t.text(), { model: hostModel(), referenceId: "ref", sourceKey: "cut", sourceId: "v1", label: "Other tool", disciplines: ["architecture"] });
+    };
+
+    const whole = build(false);
+    expect(ofKind(whole.records, "ceiling")).toHaveLength(1);
+    expect(ceilingsLine(whole.report)).toEqual({ classId: "arch.ceiling", label: "Ceilings", converted: 1, linked: [] });
+
+    const cut = build(true);
+    expect(ofKind(cut.records, "ceiling")).toEqual([]);
+    expect(ceilingsLine(cut.report)).toEqual({ classId: "arch.ceiling", label: "Ceilings", converted: 0, linked: [{ reason: "it has openings cut through it, and those aren't read from the file yet", count: 1 }] });
+  });
+
   it("leaves a ceiling with holes on the linked model, and says why", async () => {
     const model = await build(smallOffice);
     const ceilings = ofKind(model, "ceiling");

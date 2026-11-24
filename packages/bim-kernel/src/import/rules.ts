@@ -89,6 +89,8 @@ const ceiling: ImportRuleDef = {
     if (typeof level === "string") return fail(level);
     const prism = verticalPrism(p.geometry);
     if (!prism) return fail(p.geometry.unread ? `its shape is ${p.geometry.unread}` : "it isn't flat (sloped or shaped)");
+    // An opening cut as its own element leaves the outline whole, so the outline alone would bring the ceiling in filled.
+    if ((p.openings ?? 0) > 0) return fail("it has openings cut through it, and those aren't read from the file yet");
     const record: Ceiling = { ...base(ctx, p, level), kind: "ceiling", levelId: level.id, outline: prism.outline.map(roundPlan), form: "flat", heightMm: round(prism.bottom - level.elevationMm) };
     return { ok: true, records: [record] };
   },
