@@ -10,7 +10,7 @@
  * whose placement can't be a part's (tilted, or away from its shape) still
  * comes in as the box it was, and the report says so.
  */
-import { DEFAULT_SETTINGS, asRevision, gatedRecordFeatures, type BimElement, type ModelState, type PartInstance } from "@permitzip/bim-kernel";
+import { DEFAULT_SETTINGS, asRevision, gatedRecordFeatures, landImport, type BimElement, type ModelState, type PartInstance } from "@permitzip/bim-kernel";
 import { runScript, sliceModel, type ScriptDefinition } from "@permitzip/bim-script";
 import { PROTOCOL_FEATURES } from "@permitzip/bim-sync";
 import { exportIfc, importIfc, readIfcSource } from "../src";
@@ -202,6 +202,26 @@ describe("importIfc reads a part's placement from any file (#65)", () => {
     expect(got).toMatchObject({ position: { x: -6000, y: 8000 }, offsetMm: 0, rotationDeg: 0 });
     expectSameBox(worldBox(records, got), bounds("SD-1"));
     expect(plan.report.notes).toEqual(["SD-1: its insertion point is away from its shape in the file, so it sits at the middle of its box, not turned"]);
+  });
+
+  it("two upright parts of one file type whose boxes sit differently each keep their own box", () => {
+    const { plan, part, bounds, records } = foreign((t) => {
+      // The same 600 x 400 x 300 box: centred on SD-1's insertion point, and off SD-2's by (300, 200).
+      const centred = placed(t, "SD-1", [1000, 1000, 2700], t.body([t.extrude(t.rect(600, 400), 300)]));
+      const corner = placed(t, "SD-2", [5000, 4000, 2700], t.body([t.extrude(t.rect(600, 400, [300, 200]), 300)]));
+      const again = placed(t, "SD-3", [8000, 4000, 2700], t.body([t.extrude(t.rect(600, 400, [300, 200]), 300)]));
+      t.type("IFCAIRTERMINALTYPE", "Diffuser 600x400", [centred, corner, again], "DIFFUSER");
+    });
+    for (const name of ["SD-1", "SD-2", "SD-3"]) expectSameBox(worldBox(records, part(name)), bounds(name));
+    // The first box met keeps the file type's plain id; the other box is a variant, shared by the parts that sit that way.
+    expect(part("SD-1").typeId).not.toBe(part("SD-2").typeId);
+    expect(part("SD-3").typeId).toBe(part("SD-2").typeId);
+    const types = ofKind(plan.records, "part_type");
+    expect(types).toHaveLength(2);
+    expect(new Set(types.map((t) => t.id)).size).toBe(2);
+    expect(types.map((t) => t.definition.geometry)).toEqual([[{ kind: "box", center: [0, 0, 150], size: [600, 400, 300] }], [{ kind: "box", center: [300, 200, 150], size: [600, 400, 300] }]]);
+    expect(plan.report.notes).toEqual([]);
+    expect(landImport(hostModel(), plan.records).dropped).toEqual([]);
   });
 
   it("an upright and a tilted part of one type in the file each land on their own shape", () => {

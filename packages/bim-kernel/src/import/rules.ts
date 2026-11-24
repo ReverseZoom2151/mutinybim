@@ -302,6 +302,21 @@ function partSeat(p: ImportProduct, world: { readonly min: ImportPoint; readonly
   return { origin: own.origin, rotationDeg: ((deg % 360) + 360) % 360, box: own.bounds, own: true, why: null };
 }
 
+/** Whether a part type made here is this box: the same centre and size from its own point. */
+function hasBox(type: PartTypeElement, centre: ImportPoint, size: ImportPoint): boolean {
+  const box = type.definition.geometry[0];
+  if (box?.kind !== "box") return false;
+  const want = [centre.x, centre.y, centre.z, size.x, size.y, size.z];
+  return [...box.center, ...box.size].every((v, i) => v === want[i]);
+}
+
+/** A short, stable id part from a text (FNV-1a, base 36): the same box gives the same id on every import. */
+function shortHash(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);
+  return (h >>> 0).toString(36);
+}
+
 /**
  * A placed part at the product's own insertion point and turn, as the box of
  * its shape, of a part type made once per type in the file. Its connectors
@@ -324,9 +339,9 @@ const part: ImportRuleDef = {
     if (size.x < 1 || size.y < 1 || size.z < 1) return fail("it has no size");
     const centre = { x: round((seat.box.min.x + seat.box.max.x) / 2), y: round((seat.box.min.y + seat.box.max.y) / 2), z: round((seat.box.min.z + seat.box.max.z) / 2) };
     const typeName = typeNameOf(p, nameOf(p));
-    // One file type's products share a part type only while they sit the same way: a type's box hangs off its own point.
-    const typeKey = `${p.typeId ?? `${category}:${typeName}:${size.x}x${size.y}x${size.z}@${centre.x},${centre.y},${centre.z}`}${seat.own ? "" : ":box"}`;
-    const type = ctx.shared<PartTypeElement>(`part_type:${typeKey}`, () => {
+    // A part type's box hangs off its own point, so products share one only while their boxes sit the same way from theirs.
+    const boxKey = `${size.x}x${size.y}x${size.z}@${centre.x},${centre.y},${centre.z}`;
+    const typeOf = (source: string, suffix: string) => (): PartTypeElement => {
       const definition: PartTypeDefinition = {
         familyName: typeName,
         typeName,
@@ -340,8 +355,14 @@ const part: ImportRuleDef = {
         tagFields: ["mark"],
         source: { kind: "ifc", entity: p.entity, typeName, boundingBoxGeometry: true },
       };
-      return { id: ctx.idFor(p.typeId ?? `${p.sourceId}`, seat.own ? "type" : "type-box"), kind: "part_type", version: 0, authoredRev: {}, definition };
-    });
+      return { id: ctx.idFor(source, suffix), kind: "part_type", version: 0, authoredRev: {}, definition };
+    };
+    let type: PartTypeElement | string;
+    if (p.typeId) {
+      // The first box met of a file type keeps the type's plain id; a product of that type whose box sits differently gets a variant of its own.
+      type = ctx.shared<PartTypeElement>(`part_type:${p.typeId}`, typeOf(p.typeId, "type"));
+      if (typeof type !== "string" && !hasBox(type, centre, size)) type = ctx.shared<PartTypeElement>(`part_type:${p.typeId}:${boxKey}`, typeOf(p.typeId, `type-${shortHash(boxKey)}`));
+    } else type = ctx.shared<PartTypeElement>(`part_type:${category}:${typeName}:${boxKey}`, typeOf(p.sourceId, "type"));
     if (typeof type === "string") return fail(type);
     if (seat.why) ctx.note(`${typeName}: ${seat.why}`);
     if (p.ports.length > 0) ctx.note(`${typeName}: its ${p.ports.length === 1 ? "connection point wasn't" : `${p.ports.length} connection points weren't`} brought in; join it by hand`);
