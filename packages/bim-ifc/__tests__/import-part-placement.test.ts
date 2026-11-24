@@ -258,3 +258,14 @@ describe("importIfc reads a part's placement from any file (#65)", () => {
     expect(ofKind(plan.records, "part_type").map((t) => t.definition.typeName)).toEqual(["Diffuser 600x400", "Diffuser 600x400"]);
   });
 });
+
+describe("a part a hair off the origin", () => {
+  it("sits at 0, 0, not -0, -0", () => {
+    const t = IfcText.start();
+    t.storey("Level 1", 0);
+    t.product("Level 1", "IFCAIRTERMINAL", "SD-1", [-0.04, -0.04, 0], t.body([t.extrude(t.rect(600, 400), 300)]), ".DIFFUSER.", { tag: "SD-1" });
+    const { records } = importIfc(t.text(), { model: hostModel(), ...SOURCE });
+    const [part] = ofKind(records, "part");
+    expect(Object.is(part?.position.x, 0) && Object.is(part?.position.y, 0)).toBe(true);
+  });
+});
