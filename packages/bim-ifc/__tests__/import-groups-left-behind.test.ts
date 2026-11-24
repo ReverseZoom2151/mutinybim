@@ -12,7 +12,7 @@ import { PROTOCOL_FEATURES } from "@permitzip/bim-sync";
 import { exportIfc, importIfc } from "../src";
 import { Log } from "../../bim-kernel/__tests__/a13a-fixtures";
 import electricalRoom from "../../bim-script/examples/electrical-room";
-import { architectureAndStructure, hostModel, mechanicalAndSprinkler } from "./i9-fixtures";
+import { IfcText, architectureAndStructure, hostModel, mechanicalAndSprinkler } from "./i9-fixtures";
 
 const FEATURES = [...new Set([...Object.values(PROTOCOL_FEATURES), ...gatedRecordFeatures()])];
 const PROJECT = { id: "2c9a7e14-5b3d-4f86-a1e0-7d4c3b2a1f09", name: "Synthetic examples" };
@@ -67,5 +67,15 @@ describe("groups the import leaves behind are named in its report", () => {
   it("a group no class takes (the export's own organization group) isn't named", () => {
     const { report } = readBack(model);
     expect(report.notes.join(" ")).not.toContain("General");
+  });
+
+  it("a very long group name is cut short in the note", () => {
+    const t = IfcText.start();
+    t.storey("Level 1", 0);
+    const head = t.product("Level 1", "IFCFIRESUPPRESSIONTERMINAL", "Head", [0, 0, 2900], t.body([t.extrude(t.circle(30), 50)]), ".SPRINKLER.", { tag: "SP-1" });
+    t.assign(t.system("x".repeat(5000), "FIREPROTECTION"), [head]);
+    const { report } = importIfc(t.text(), opts("Long name"));
+    const [note] = report.notes.filter((n) => n.includes("brought in ("));
+    expect(note).toBe(`1 system wasn't brought in (${"x".repeat(79)}…); anything in it that converted came in on its own, so set it up again by hand`);
   });
 });

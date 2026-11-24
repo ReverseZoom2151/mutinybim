@@ -33,6 +33,8 @@ export interface PlanImportOptions {
 const LEVEL_MATCH_MM = 50;
 /** Group names a report note spells out before "and N more". */
 const GROUP_NAMES_SHOWN = 5;
+/** A group name longer than this is cut short in the note, so one name can't fill the report. */
+const GROUP_NAME_MAX = 80;
 
 /** "2 walls", "1 air terminal", "1 floor or slab": the label's nouns counted (registry labels are mostly plural, some singular). */
 function plural(n: number, label: string): string {
@@ -198,7 +200,8 @@ function planInScope(source: ImportSource, opts: PlanImportOptions): IfcImportPl
     const cls = map.candidates(group)[0];
     if (!cls) continue;
     const left = leftGroups.get(cls.id) ?? { label: cls.label, names: [] };
-    left.names.push(group.name?.trim() || "unnamed");
+    const name = group.name?.trim() || "unnamed";
+    left.names.push(name.length > GROUP_NAME_MAX ? `${name.slice(0, GROUP_NAME_MAX - 1).trimEnd()}…` : name);
     leftGroups.set(cls.id, left);
   }
   const groupNotes = [...leftGroups.values()].map(({ label, names }) => {
