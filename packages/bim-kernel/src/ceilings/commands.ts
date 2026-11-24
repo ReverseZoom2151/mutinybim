@@ -10,7 +10,7 @@ import { asElementId, type BimElement, type ElementId, type Level, type ModelSta
 import { CEILING_CLASS_ID, CEILINGS_NOT_YET, ceilingsWritable } from "./feature";
 import { ceilingForm, ceilingLabel, ceilingSlope, defaultRoleForForm, isCeiling, surfaceRoles } from "./read";
 import { ceilingStructureProblem, ftIn } from "./structure";
-import { KNOWN_CEILING_FORMS, type Ceiling, type CeilingForm, type CeilingGrid, type CeilingSlope } from "./types";
+import { CEILING_HEIGHT_MAX_MM, CEILING_HOLES_MAX, CEILING_OUTLINE_MAX_POINTS, KNOWN_CEILING_FORMS, type Ceiling, type CeilingForm, type CeilingGrid, type CeilingSlope } from "./types";
 
 /**
  * Ceiling edits: the one path the ceiling plan's Ceiling tool, "Make a
@@ -24,9 +24,9 @@ import { KNOWN_CEILING_FORMS, type Ceiling, type CeilingForm, type CeilingGrid, 
 
 const id = z.string().trim().min(1).max(200);
 const vec2 = z.object({ x: z.number().finite().min(-1e9).max(1e9), y: z.number().finite().min(-1e9).max(1e9) }).strict();
-const outline = z.array(vec2).min(3).max(2000);
+const outline = z.array(vec2).min(3).max(CEILING_OUTLINE_MAX_POINTS);
 /** Heights above the level, mm (up to about 330 ft). */
-const heightMm = z.number().finite().positive().max(100_000);
+const heightMm = z.number().finite().positive().max(CEILING_HEIGHT_MAX_MM);
 const slope = z
   .object({
     /** Degrees counter-clockwise from east: the direction the plane rises toward. */
@@ -55,7 +55,7 @@ const ceilingInput = z
     /** The space it is hosted in. Absent: in none (a canopy, an open area). */
     spaceId: id.optional(),
     outline,
-    holes: z.array(outline).max(200).optional(),
+    holes: z.array(outline).max(CEILING_HOLES_MAX).optional(),
     /** Absent: sloped when a slope is given, else flat. */
     form: form.optional(),
     heightMm,
@@ -83,7 +83,7 @@ export const ceilingCommandSchemas = [
       spaceId: id.nullable().optional(),
       outline: outline.optional(),
       /** `null` (or an empty list) removes every hole. */
-      holes: z.array(outline).max(200).nullable().optional(),
+      holes: z.array(outline).max(CEILING_HOLES_MAX).nullable().optional(),
       form: form.optional(),
       heightMm: heightMm.optional(),
       reference: vec2.nullable().optional(),

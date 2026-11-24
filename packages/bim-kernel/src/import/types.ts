@@ -25,6 +25,12 @@ export interface ImportExtrusion {
   readonly rectangle?: { readonly x: number; readonly y: number };
   /** Holes cut through the profile, each an outline in world space on the profile's plane. Set only when every hole was read. */
   readonly holes?: readonly (readonly ImportPoint[])[];
+  /**
+   * Set when `base` is only the profile's outer bound, not its true outline: a hollow section's outside edge, a
+   * rounded rectangle with its corners squared, or a rolled shape (I, L, T, U, C, Z) as the box around it. Right for
+   * a member read by its size; a rule whose kind is its plan outline should not take `base` for that outline.
+   */
+  readonly outerBound?: true;
 }
 
 /**
