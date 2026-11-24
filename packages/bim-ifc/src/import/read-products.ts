@@ -108,7 +108,6 @@ function siScale(u: ReadEntity): number {
   return prefix ? (per[prefix] ?? 1000) : 1000;
 }
 
-/** The attribute index of a named own attribute after the 8-attribute element prefix (null when the entity doesn't have it). */
 /** A predefined type that says nothing: left out, or NOTDEFINED. */
 const unset = (predefined: string | null): boolean => predefined === null || predefined === "NOTDEFINED";
 
@@ -123,6 +122,7 @@ function typePredefined(type: ReadEntity | undefined): string | null {
   return i >= 0 ? enumOf(type.args[TYPE_OWN_START + i]) : null;
 }
 
+/** The attribute index of a named own attribute after the 8-attribute element prefix (null when the entity doesn't have it). */
 function ownIndex(entity: string, name: string): number | null {
   // Only element entities share the 8-attribute prefix; a space or a grid doesn't.
   if (!ifcEntityName(entity)) return null;
