@@ -338,6 +338,59 @@ describe("importIfc reads ports from any file (#65)", () => {
     expect(plan.report.notes).toEqual([]);
   });
 
+  it("a flow unit with a prefix on a cubic or square metre: the prefix counts once for each dimension", () => {
+    const { connectors } = foreign((t) => {
+      const host = terminal(t, "SD-1", [5000, 4000, 2700], box(t));
+      const [cubic, square] = nest(t, host, [
+        { name: "Supply air", at: [0, 0, 300], facing: [0, 0, 1], kind: DUCT_SUPPLY },
+        { name: "Return", at: [0, 0, 0], facing: [0, 0, -1], kind: DUCT_SUPPLY },
+      ]);
+      const second = () => t.add("IFCDERIVEDUNITELEMENT", `#${t.add("IFCSIUNIT", "*,.TIMEUNIT.,$,.SECOND.")},-1`);
+      const flow = (to: number, value: string, elements: readonly number[]) => {
+        const unit = t.add("IFCDERIVEDUNIT", `(${elements.map((e) => `#${e}`).join(",")}),.VOLUMETRICFLOWRATEUNIT.,$,$`);
+        const prop = t.add("IFCPROPERTYSINGLEVALUE", `'VolumetricFlowRate',$,IFCVOLUMETRICFLOWRATEMEASURE(${value}),#${unit}`);
+        const set = t.add("IFCPROPERTYSET", `${t.guid()},$,'Pset_DistributionPortTypeDuct',$,(#${prop})`);
+        t.add("IFCRELDEFINESBYPROPERTIES", `${t.guid()},$,$,$,(#${to}),#${set}`);
+      };
+      // Cubic millimetres a second: a milli cubic metre is a millimetre cubed, 1e-9 m3. 1e9 mm3/s is 1 m3/s.
+      flow(cubic ?? 0, "1.E9", [t.add("IFCDERIVEDUNITELEMENT", `#${t.add("IFCSIUNIT", "*,.VOLUMEUNIT.,.MILLI.,.CUBIC_METRE.")},1`), second()]);
+      // Square millimetres times metres a second: a milli square metre is a millimetre squared, 1e-6 m2. 1e6 of them is 1 m3/s.
+      flow(square ?? 0, "1.E6", [t.add("IFCDERIVEDUNITELEMENT", `#${t.add("IFCSIUNIT", "*,.AREAUNIT.,.MILLI.,.SQUARE_METRE.")},1`), t.add("IFCDERIVEDUNITELEMENT", `#${t.add("IFCSIUNIT", "*,.LENGTHUNIT.,$,.METRE.")},1`), second()]);
+    });
+    // 1 m3/s is 2118.88 cubic feet a minute.
+    expect(connectors("SD-1")).toMatchObject([
+      { id: "supply_air", flow: expect.closeTo(2118.88, 2) },
+      { id: "return", flow: expect.closeTo(2118.88, 2) },
+    ]);
+  });
+
+  it("an older port with no kind of its own keeps the flow its duct property set gives it", () => {
+    const { connectors, ports, plan } = foreign((t) => {
+      const host = terminal(t, "SD-1", [5000, 4000, 2700], box(t));
+      // IFC2X3's port stops at its flow direction: what it connects to is said only by its standard property set and its element's system.
+      const id = port(t, host.placement, { name: "Inlet", at: [0, 0, 300], facing: [0, 0, 1], kind: ".SINK." });
+      t.add("IFCRELCONNECTSPORTTOELEMENT", `${t.guid()},$,$,$,#${id},#${host.id}`);
+      t.assign(t.system("Supply Air 1", "AIRCONDITIONING"), [host.id]);
+      const props = [t.add("IFCPROPERTYSINGLEVALUE", `'NominalWidth',$,IFCPOSITIVELENGTHMEASURE(250.),$`), t.add("IFCPROPERTYSINGLEVALUE", `'VolumetricFlowRate',$,IFCVOLUMETRICFLOWRATEMEASURE(0.2),$`)];
+      const set = t.add("IFCPROPERTYSET", `${t.guid()},$,'Pset_DistributionPortTypeDuct',$,(${props.map((p) => `#${p}`).join(",")})`);
+      t.add("IFCRELDEFINESBYPROPERTIES", `${t.guid()},$,$,$,(#${id}),#${set}`);
+    });
+    expect(ports("SD-1")).toMatchObject([{ domain: "duct", systemType: null }]);
+    // 0.2 m3/s is 423.776 cubic feet a minute.
+    expect(connectors("SD-1")).toEqual([{ id: "inlet", label: "Inlet", domain: "duct", systemKind: "supply_air", position: [0, 0, 300], direction: [0, 0, 1], shape: "round", diameter: 250, flow: expect.closeTo(423.776, 2), flowDirection: "in" }]);
+    expect(leftOut(plan.report.notes)).toEqual([]);
+  });
+
+  it("a cable-carrier port on a part comes in as an electrical connector", () => {
+    const { connectors, ports, plan } = foreign((t) => {
+      const host = terminal(t, "SD-1", [5000, 4000, 2700], box(t));
+      nest(t, host, [{ name: "Raceway", at: [0, 0, 300], facing: [0, 0, 1], kind: ".SINK.,.CABLECARRIER.,.ELECTRICAL." }]);
+    });
+    expect(ports("SD-1")).toMatchObject([{ domain: "electrical" }]);
+    expect(connectors("SD-1")).toEqual([{ id: "raceway", label: "Raceway", domain: "electrical", systemKind: "power", position: [0, 0, 300], direction: [0, 0, 1], shape: "none", flowDirection: "in" }]);
+    expect(plan.report.notes).toEqual([]);
+  });
+
   it("a port placed from the storey, not from its host, lands at the same point of the part", () => {
     const { connectors, plan } = foreign((t) => {
       const host = terminal(t, "SD-1", [5000, 4000, 2700], box(t), { x: [0, 1, 0] });

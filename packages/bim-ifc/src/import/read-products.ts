@@ -116,10 +116,22 @@ function siScale(u: ReadEntity): number {
 }
 
 /**
- * What a port connects to, from its PredefinedType (IfcDistributionPortTypeEnum): the connector id the exporter
- * writes that word for (`PORT_DOMAIN` in export.ts, read the other way).
+ * What a port on a part connects to, from its PredefinedType (IfcDistributionPortTypeEnum): a part-connector domain
+ * of the service registry. A cable carrier (conduit, tray) is a kind of run; what plugs into a part is electrical,
+ * as the kernel's `connectorDomainOf` has it.
  */
-const PORT_CONNECTS: Readonly<Record<string, string>> = { DUCT: "duct", PIPE: "pipe", CABLE: "electrical", CABLECARRIER: "conduit" };
+const PORT_CONNECTS: Readonly<Record<string, string>> = { DUCT: "duct", PIPE: "pipe", CABLE: "electrical", CABLECARRIER: "electrical" };
+
+/**
+ * What a port connects to, from the standard property set it carries (`Pset_DistributionPortTypeDuct` is a duct
+ * port's): for a port with no PredefinedType of its own, as in IFC2X3. Longest name first, so a cable carrier isn't a cable.
+ */
+const PORT_SET_CONNECTS: readonly (readonly [string, string])[] = [
+  ["TypeCableCarrier", "electrical"],
+  ["TypeCable", "electrical"],
+  ["TypeDuct", "duct"],
+  ["TypePipe", "pipe"],
+];
 
 /** The standard port property sets a port's size, flow and voltage are read from (`Pset_DistributionPortTypeDuct`, `…TypePipe`, `…TypeCable` and their kin). */
 const PORT_SETS = "Pset_DistributionPort";
@@ -135,6 +147,9 @@ const SI_PREFIX: Readonly<Record<string, number>> = {
   DECI: 1e-1, CENTI: 1e-2, MILLI: 1e-3, MICRO: 1e-6, NANO: 1e-9, PICO: 1e-12, FEMTO: 1e-15, ATTO: 1e-18,
 };
 
+/** The power an SI unit name raises its metre to: a prefix on it counts that many times (a milli cubic metre is a millimetre cubed). */
+const SI_NAME_POWER: Readonly<Record<string, number>> = { SQUARE_METRE: 2, CUBIC_METRE: 3 };
+
 /**
  * How many SI units one of a file unit is: an SI unit with its prefix, a unit converted from another (a foot, a
  * US gallon, a minute), or one derived from others (cubic feet per minute). Null: not a unit this reads.
@@ -143,7 +158,11 @@ function siFactor(file: StepFile, u: ReadEntity | undefined, depth = 0): number 
   if (!u || depth > 4) return null;
   if (u.type === "IFCSIUNIT") {
     const prefix = enumOf(u.args[2]);
-    return prefix ? (SI_PREFIX[prefix] ?? null) : 1;
+    const name = enumOf(u.args[3]) ?? "";
+    const scale = prefix ? (SI_PREFIX[prefix] ?? null) : 1;
+    if (scale === null) return null;
+    // The SI unit of mass is the kilogram, and IFC names the gram.
+    return scale ** (SI_NAME_POWER[name] ?? 1) * (name === "GRAM" ? 1e-3 : 1);
   }
   if (u.type === "IFCCONVERSIONBASEDUNIT" || u.type === "IFCCONVERSIONBASEDUNITWITHOFFSET") {
     const measure = file.entities.get(refs(u.args[3])[0] ?? -1);
@@ -335,11 +354,19 @@ export function readIfcSource(text: string, opts: IfcReadOptions): ImportSource 
    * the project's). A plain value, or a bounded value's set point (else its two bounds when they agree). Many ports
    * may share one set.
    */
+  const portSets = (pid: number): ReadEntity[] =>
+    (psetsOf.get(pid) ?? []).flatMap((p) => {
+      const set = file.entities.get(p);
+      return set?.type === "IFCPROPERTYSET" && (str(set.args[2]) ?? "").startsWith(PORT_SETS) ? [set] : [];
+    });
+  /** What a port's standard property sets say it connects to, when they all say the same. Null: none says, or they disagree. */
+  const portSetConnects = (pid: number): string | null => {
+    const said = new Set(portSets(pid).flatMap((set) => PORT_SET_CONNECTS.find(([end]) => (str(set.args[2]) ?? "").endsWith(end))?.[1] ?? []));
+    return said.size === 1 ? ([...said][0] ?? null) : null;
+  };
   const portNumbers = (pid: number): ReadonlyMap<string, { readonly value: number; readonly unit: ReadEntity | undefined }> => {
     const out = new Map<string, { value: number; unit: ReadEntity | undefined }>();
-    for (const p of psetsOf.get(pid) ?? []) {
-      const set = file.entities.get(p);
-      if (set?.type !== "IFCPROPERTYSET" || !(str(set.args[2]) ?? "").startsWith(PORT_SETS)) continue;
+    for (const set of portSets(pid)) {
       for (const propId of refs(set.args[4])) {
         const prop = file.entities.get(propId);
         const key = prop ? str(prop.args[0]) : null;
@@ -398,7 +425,8 @@ export function readIfcSource(text: string, opts: IfcReadOptions): ImportSource 
     const own = frame ? geo.entity(placed?.args[1]) : null;
     const stated = (i: number): boolean => own?.type === "IFCAXIS2PLACEMENT3D" && geo.entity(own.args[i])?.type === "IFCDIRECTION";
     const systemType = enumOf(port.args[9]);
-    const domain = PORT_CONNECTS[enumOf(port.args[8]) ?? ""] ?? null;
+    // What it connects to is its own PredefinedType; a port with none (IFC2X3) may still say it by the standard set it carries.
+    const domain = PORT_CONNECTS[enumOf(port.args[8]) ?? ""] ?? portSetConnects(pid);
     return [
       {
         id,
