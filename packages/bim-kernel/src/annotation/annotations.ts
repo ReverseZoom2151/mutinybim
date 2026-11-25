@@ -19,6 +19,8 @@ import { addOnMarkedPoint, addOnRun, addOnTagCategory, addOnTagText, isAddOnReco
 import { tagFieldAliases } from "./tag-types";
 import { outlineAreaMm2, spaceAreaM2, spaceOutlines } from "../spaces/space-geometry";
 import { ceilingForm, ceilingHeightAtPoint, ceilingRole } from "../ceilings/read";
+import { columnVerticalSpan } from "../placement/top-tie";
+import { wallBaseAtMm } from "../placement/surface-bind";
 import { partPlanOutline, type PlanOutline } from "../drawing/part-outline";
 import { parseLinkedElementKey } from "../reference-geometry/index-geometry";
 import { linkedAnchorInSection, linkedAnchorItem, linkedAnchorPoint, missingLinkedAnchorWords } from "../reference-geometry/linked-anchors";
@@ -106,7 +108,7 @@ export interface TagSpec {
   readonly elbow?: Vec2 | "auto";
 }
 
-export const LEADER_ARROWS = ["arrow", "dot", "tick", "none"] as const;
+export const LEADER_ARROWS = ["arrow", "filled_arrow", "dot", "filled_dot", "tick", "none"] as const;
 
 const vec2 = z.object({ x: z.number().finite(), y: z.number().finite() });
 export const anchorRefSchema = z.object({ elementId: z.string().min(1).max(200), anchor: z.enum(ANCHORS), index: z.number().int().min(0).max(49).optional() }).strict();
@@ -206,6 +208,14 @@ function lineOf(model: Pick<ModelState, "elements">, el: BimElement): [Point3, P
         { ...el.start, z: 0 },
         { ...el.end, z: 0 },
       ];
+    case "beam": {
+      const p = el.placement?.kind === "line" ? el.placement : null;
+      const lvlZ = p ? levelZ(model, p.levelId) : (viewModelLevel(model, el.partition?.level)?.elevationMm ?? 0);
+      return [
+        { ...el.start, z: lvlZ + (p?.startOffsetMm ?? 0) },
+        { ...el.end, z: lvlZ + (p?.endOffsetMm ?? 0) },
+      ];
+    }
     default: {
       void model;
       const run = addOnRun(el);
@@ -395,8 +405,14 @@ function pointOf(model: Pick<ModelState, "elements">, el: BimElement): Point3 | 
     case "part":
       return { ...el.position, z: levelZ(model, el.levelId) + el.offsetMm };
     case "column": {
-      const colLvl = el.placement?.kind === "point" ? levelZ(model, el.placement.levelId) : (viewModelLevel(model, el.partition?.level)?.elevationMm ?? 0);
-      return { ...el.position, z: colLvl + 1500 };
+      const fallback = viewModelLevel(model, el.partition?.level)?.elevationMm ?? 0;
+      const span = columnVerticalSpan(model.elements, el, fallback);
+      return { ...el.position, z: (span.baseZMm + span.topZMm) / 2 };
+    }
+    case "component": {
+      const lvlZ = el.placement?.kind === "point" ? levelZ(model, el.placement.levelId) : (viewModelLevel(model, el.partition?.level)?.elevationMm ?? 0);
+      const off = el.placement?.kind === "point" ? el.placement.offsetMm : 0;
+      return { ...el.position, z: lvlZ + off };
     }
     case "opening": {
       const host = model.elements[el.hostId];
@@ -404,9 +420,10 @@ function pointOf(model: Pick<ModelState, "elements">, el: BimElement): Point3 | 
         host?.kind === "wall" && host.placement?.kind === "line"
           ? levelZ(model, host.placement.levelId)
           : (viewModelLevel(model, host?.partition?.level ?? el.partition?.level)?.elevationMm ?? 0);
+      const hostBase = host ? wallBaseAtMm(host, el.offset) : 0;
       const rawSill = (el as unknown as { readonly values?: Readonly<Record<string, unknown>> }).values?.["opening.sill_mm"];
       const sillMm = typeof rawSill === "number" ? rawSill : el.openingType === "window" ? 915 : 0;
-      return { ...el.position, z: hostZ + sillMm + el.height / 2 };
+      return { ...el.position, z: hostZ + hostBase + sillMm + el.height / 2 };
     }
     case "run_fitting":
       return el.position;
@@ -658,7 +675,7 @@ function linearSegment(ctx: AnnotationDrawContext, itemId: string, pa: Vec2, pb:
   const mid = mul(add(a2, b2), 0.5);
   // Unidirectional text (always horizontal): above a horizontal or sloped line, beside a vertical one.
   const vertical = Math.abs(axis.x) < 0.3;
-  const side = offset >= 0 ? 1 : -1;
+  const side = n.x * (offset >= 0 ? 1 : -1) >= 0 ? 1 : -1;
   const textAt = vertical ? { x: mid.x + side * 1.5, y: mid.y + style.textSizeMm / 2 } : { x: mid.x, y: mid.y - 1.2 };
   const anchor: "start" | "middle" | "end" = vertical ? (side > 0 ? "start" : "end") : "middle";
   ctx.prims.push({ kind: "text", at: textAt, text: label, size: style.textSizeMm, anchor });
@@ -1465,6 +1482,7 @@ export function leaderPrims(from: Vec2, to: Vec2, elbow: Vec2 | undefined, arrow
   const head = Math.min(2.5, l / 3);
   switch (arrow ?? "arrow") {
     case "arrow":
+    case "filled_arrow":
       segs.push([to, add(sub(to, mul(u, head)), mul(n, head * 0.35))], [to, sub(sub(to, mul(u, head)), mul(n, head * 0.35))]);
       break;
     case "tick": {
@@ -1472,7 +1490,8 @@ export function leaderPrims(from: Vec2, to: Vec2, elbow: Vec2 | undefined, arrow
       segs.push([sub(to, t), add(to, t)]);
       break;
     }
-    case "dot": {
+    case "dot":
+    case "filled_dot": {
       const r = 0.6;
       for (let i = 0; i < 8; i++) {
         const a0 = (i * Math.PI) / 4;
@@ -1485,4 +1504,39 @@ export function leaderPrims(from: Vec2, to: Vec2, elbow: Vec2 | undefined, arrow
       break;
   }
   return segs;
+}
+
+/** A leader on paper as full drawing primitives, including solid filled NCS arrowheads and dots. */
+export function leaderPrimitives(from: Vec2, to: Vec2, elbow: Vec2 | undefined, arrow: (typeof LEADER_ARROWS)[number] | undefined): Primitive[] {
+  const kind = arrow ?? "arrow";
+  if (kind !== "filled_arrow" && kind !== "filled_dot") {
+    return leaderPrims(from, to, elbow, kind).map(([a, b]) => ({ kind: "line", a, b, pen: "thin" }));
+  }
+  const pts = elbow ? [from, elbow, to] : [from, to];
+  const out: Primitive[] = [];
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1];
+    const b = pts[i];
+    if (a && b) out.push({ kind: "line", a, b, pen: "thin" });
+  }
+  const last = pts[pts.length - 2] ?? from;
+  const d = sub(to, last);
+  const l = len(d);
+  if (l < 1) return out;
+  const u = mul(d, 1 / l);
+  const n = { x: -u.y, y: u.x };
+  if (kind === "filled_arrow") {
+    const head = Math.min(2.6, l / 2.5);
+    const back = sub(to, mul(u, head));
+    const half = head * 0.28;
+    out.push({ kind: "fill", points: [to, add(back, mul(n, half)), sub(back, mul(n, half))], grey: 0 });
+  } else {
+    const r = 0.65;
+    out.push({
+      kind: "fill",
+      points: Array.from({ length: 10 }, (_, i) => add(to, { x: r * Math.cos((i * Math.PI) / 5), y: r * Math.sin((i * Math.PI) / 5) })),
+      grey: 0,
+    });
+  }
+  return out;
 }

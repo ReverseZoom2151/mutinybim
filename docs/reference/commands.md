@@ -251,7 +251,7 @@ Every single edit a script may send with `ctx.edit`, read from the kernel's own 
 - lineStyle?: { weight?: "thin"|"medium"|"wide"|"heavy"; pattern?: "solid"|"dashed"|"hidden"|"center"|"phantom"|"dotted" }
 - closed?: boolean
 - ccw?: boolean
-- fill?: { pattern: "solid"|"diagonal"|"diagonal_reverse"|"crosshatch"|"horizontal"|"vertical"|"dots"|"concrete"|"earth"|"insulation_rigid"|"masonry"; spacingMm?: number; grey?: number; masking?: boolean; boundary?: boolean }
+- fill?: { pattern: "solid"|"diagonal"|"diagonal_reverse"|"crosshatch"|"horizontal"|"vertical"|"dots"|"concrete"|"earth"|"insulation_rigid"|"masonry"|"steel_section"|"gravel"|"sand"|"gypsum"|"wood_grain"|"metal_deck"|"roofing_membrane"|"acoustic"; spacingMm?: number; grey?: number; tone?: "ink"|"halftone"|"screened"; masking?: boolean; boundary?: boolean }
 - component?: { symbolId: string; widthMm?: number; heightMm?: number; rotationDeg?: number; mirror?: boolean; spacingMm?: number }
 - batt?: { thicknessMm: number }
 - category?: "detail_lines"|"hatching"|"masking"|"components"|"insulation"|"text"|"dimensions"|"tags"|"clouds"
@@ -388,12 +388,15 @@ Every single edit a script may send with `ctx.edit`, read from the kernel's own 
 
 - elementId: string
 - levelId: string
-- placement: { kind: "point"; position: { x: number; y: number }; rotationDeg?: number } | { kind: "line"; start: { x: number; y: number }; end: { x: number; y: number } } | { kind: "area"; outline: { x: number; y: number }[]; holes?: { x: number; y: number }[][] }
+- placement: { kind: "point"; position: { x: number; y: number }; rotationDeg?: number } | { kind: "line"; start: { x: number; y: number }; end: { x: number; y: number } } | { kind: "area"; outline: { x: number; y: number }[]; holes?: { x: number; y: number }[][]; spanDirectionDeg?: number }
 - kind: string
+- classId?: string
 - typeId?: string
 - values?: object
 - size?: { thicknessMm?: number; heightMm?: number; widthMm?: number; depthMm?: number }
 - label?: string
+- category?: string
+- material?: string
 - topLevelId?: string
 - topOffsetMm?: number
 - topSurface?: { to: "structure"|"ceiling"|"roof"|"floor"; elementId?: string; face?: "top"|"underside"; offsetMm?: number }
@@ -415,10 +418,13 @@ Every single edit a script may send with `ctx.edit`, read from the kernel's own 
 - points: { x: number; y: number }[]
 - closed?: boolean
 - kind: string
+- classId?: string
 - typeId?: string
 - values?: object
 - size?: { thicknessMm?: number; heightMm?: number; widthMm?: number; depthMm?: number }
 - label?: string
+- category?: string
+- material?: string
 - topLevelId?: string
 - topOffsetMm?: number
 - topSurface?: { to: "structure"|"ceiling"|"roof"|"floor"; elementId?: string; face?: "top"|"underside"; offsetMm?: number }
@@ -536,9 +542,10 @@ Every single edit a script may send with `ctx.edit`, read from the kernel's own 
 - rotation?: number
 - textSize?: number
 - lineSpacing?: number
+- mask?: boolean
 - paragraphs: { runs: { text: string; bold?: boolean; italic?: boolean; underline?: boolean; size?: number; font?: "sans"; color?: string }[]; align?: "left"|"center"|"right"|"justify"; list?: { kind: "bullet"|"numbered"; level: number; start?: number } }[]
 - leader?: { x: number; y: number } | null
-- leaders?: { to: { x: number; y: number }; elbow?: { x: number; y: number }; arrow?: "arrow"|"dot"|"tick"|"none" }[]
+- leaders?: { to: { x: number; y: number }; elbow?: { x: number; y: number }; arrow?: "arrow"|"filled_arrow"|"dot"|"filled_dot"|"tick"|"none" }[]
 
 ## create_text_style
 
@@ -807,6 +814,7 @@ Every single edit a script may send with `ctx.edit`, read from the kernel's own 
 - paragraphs: { runs: { text: string; bold?: boolean; italic?: boolean; underline?: boolean; size?: number; font?: "sans"; color?: string }[]; align?: "left"|"center"|"right"|"justify"; list?: { kind: "bullet"|"numbered"; level: number; start?: number } }[]
 - textSize?: number
 - lineSpacing?: number
+- mask?: boolean
 
 ## edit_underlay
 
@@ -932,8 +940,9 @@ Every single edit a script may send with `ctx.edit`, read from the kernel's own 
 - itemId: string
 - at?: { x: number; y: number }
 - rotation?: number
+- mask?: boolean
 - leader?: { x: number; y: number } | null
-- leaders?: { to: { x: number; y: number }; elbow?: { x: number; y: number }; arrow?: "arrow"|"dot"|"tick"|"none" }[]
+- leaders?: { to: { x: number; y: number }; elbow?: { x: number; y: number }; arrow?: "arrow"|"filled_arrow"|"dot"|"filled_dot"|"tick"|"none" }[]
 
 ## move_viewport
 
@@ -1274,7 +1283,7 @@ Every single edit a script may send with `ctx.edit`, read from the kernel's own 
 ## set_element_placement
 
 - elementId: string
-- placement: { kind: "point"; levelId: string; position: { x: number; y: number }; offsetMm: number; rotationDeg: number } | { kind: "line"; levelId: string; start: { x: number; y: number }; end: { x: number; y: number }; startOffsetMm: number; endOffsetMm: number; lateral: "left"|"center"|"right"; vertical: "top"|"center"|"bottom"; rollDeg?: number; topLevelId?: string; topOffsetMm?: number; topSurface?: { to: "structure"|"ceiling"|"roof"|"floor"; elementId?: string; face?: "top"|"underside"; offsetMm?: number }; baseSurface?: { to: "structure"|"ceiling"|"roof"|"floor"; elementId?: string; face?: "top"|"underside"; offsetMm?: number } } | { kind: "path"; levelId: string; start: { x: number; y: number }; segments: { kind: "line"; to: {…} } | { kind: "arc"; to: {…}; bulge: number }[]; startStationMm?: number; profile?: { stationMm: number; elevationMm: number }[]; offsetMm: number; lateral: "left"|"center"|"right" } | { kind: "area"; levelId: string; outline: { x: number; y: number }[]; holes?: { x: number; y: number }[][]; offsetMm: number; vertical: "top"|"center"|"bottom"; spanDirectionDeg?: number; slope?: { directionDeg: number; rise: number } } | null
+- placement: { kind: "point"; levelId: string; position: { x: number; y: number }; offsetMm: number; rotationDeg: number; topLevelId?: string; topOffsetMm?: number } | { kind: "line"; levelId: string; start: { x: number; y: number }; end: { x: number; y: number }; startOffsetMm: number; endOffsetMm: number; lateral: "left"|"center"|"right"; vertical: "top"|"center"|"bottom"; rollDeg?: number; topLevelId?: string; topOffsetMm?: number; topSurface?: { to: "structure"|"ceiling"|"roof"|"floor"; elementId?: string; face?: "top"|"underside"; offsetMm?: number }; baseSurface?: { to: "structure"|"ceiling"|"roof"|"floor"; elementId?: string; face?: "top"|"underside"; offsetMm?: number } } | { kind: "path"; levelId: string; start: { x: number; y: number }; segments: { kind: "line"; to: {…} } | { kind: "arc"; to: {…}; bulge: number }[]; startStationMm?: number; profile?: { stationMm: number; elevationMm: number }[]; offsetMm: number; lateral: "left"|"center"|"right" } | { kind: "area"; levelId: string; outline: { x: number; y: number }[]; holes?: { x: number; y: number }[][]; offsetMm: number; vertical: "top"|"center"|"bottom"; spanDirectionDeg?: number; slope?: { directionDeg: number; rise: number } } | null
 - heightMm?: number
 
 ## set_element_thickness
@@ -1629,7 +1638,7 @@ Every single edit a script may send with `ctx.edit`, read from the kernel's own 
 - lineStyle?: { weight?: "thin"|"medium"|"wide"|"heavy"; pattern?: "solid"|"dashed"|"hidden"|"center"|"phantom"|"dotted" }
 - closed?: boolean
 - ccw?: boolean
-- fill?: { pattern: "solid"|"diagonal"|"diagonal_reverse"|"crosshatch"|"horizontal"|"vertical"|"dots"|"concrete"|"earth"|"insulation_rigid"|"masonry"; spacingMm?: number; grey?: number; masking?: boolean; boundary?: boolean }
+- fill?: { pattern: "solid"|"diagonal"|"diagonal_reverse"|"crosshatch"|"horizontal"|"vertical"|"dots"|"concrete"|"earth"|"insulation_rigid"|"masonry"|"steel_section"|"gravel"|"sand"|"gypsum"|"wood_grain"|"metal_deck"|"roofing_membrane"|"acoustic"; spacingMm?: number; grey?: number; tone?: "ink"|"halftone"|"screened"; masking?: boolean; boundary?: boolean }
 - component?: { symbolId: string; widthMm?: number; heightMm?: number; rotationDeg?: number; mirror?: boolean; spacingMm?: number }
 - batt?: { thicknessMm: number }
 - category?: "detail_lines"|"hatching"|"masking"|"components"|"insulation"|"text"|"dimensions"|"tags"|"clouds"
