@@ -66,7 +66,7 @@ import { derivedIfcGuid, isIfcGuid, isUuid, projectNamespace, relationshipIfcGui
 import { PROXY, primaryClass, resolveIfcClass, type ResolvedIfcClass } from "./mapping";
 import { ParameterHomes, PropertyBag, baselineParameterHomes, registryParameterHomes, writeSets, type ParameterHome, type PropertyInput } from "./properties";
 import { ownAttributes, predefinedTypes } from "./schema-ifc4x3";
-import { $, bool, en, int, list, opt, real, str, serializeStep, StepGraph, type StepRef, type StepValue } from "./step";
+import { $, bool, en, int, list, opt, real, str, serializeStep, StepGraph, StepValueError, type StepRef, type StepValue } from "./step";
 import { UnitSet } from "./units";
 
 /**
@@ -220,17 +220,75 @@ function importedGlobalId(el: BimElement): string | null {
   return null;
 }
 
+/** What a record is called in a message: its kind in words and, when it has one, its mark, name, label or number. */
+function recordWords(el: { readonly kind: string }): string {
+  const entry: unknown = Reflect.get(el, "entry");
+  const named: object = typeof entry === "object" && entry !== null ? entry : el;
+  const type: unknown = named === el ? el.kind : Reflect.get(named, "type");
+  const kind = typeof type === "string" && type !== "" ? type.replace(/_/g, " ") : "record";
+  for (const key of ["mark", "name", "label", "number"]) {
+    const v: unknown = Reflect.get(named, key);
+    if (typeof v === "string" && v.trim() !== "") return `${kind} "${v.trim().slice(0, 80)}"`;
+  }
+  return kind;
+}
+
+/** Stored fields (three deep, the first three found) that hold no value or a number that isn't one: where to look first. */
+function suspectFields(el: object): string[] {
+  const found: string[] = [];
+  const walk = (v: object, at: string, depth: number): void => {
+    for (const [k, x] of Object.entries(v)) {
+      if (found.length >= 3) return;
+      const path = at ? `${at}.${k}` : k;
+      if (x === null || x === undefined || (typeof x === "number" && !Number.isFinite(x))) found.push(path);
+      else if (typeof x === "object" && depth < 2) walk(x, path, depth + 1);
+    }
+  };
+  walk(el, "", 0);
+  return found;
+}
+
+/** Why a record's writer failed, in plain words: its own reason, else what kind of value was missing, with the stored fields to look at first. */
+function whyNotWritten(el: object, err: unknown): string {
+  const suspects = suspectFields(el);
+  const look = suspects.length > 0 ? ` (look first at ${suspects.map((f) => `"${f}"`).join(", ")}: no value, or not a number)` : "";
+  if (err instanceof StepValueError) return `${err.wanted === "text" ? "a text it needs (a name, number or mark) is missing or is not text" : err.wanted === "enum" ? "a choice it stores is not one IFC has a word for" : "a number it needs is missing or is not a number"}${look}`;
+  if (err instanceof TypeError || err instanceof RangeError) return `part of its stored record is missing or is not what the exporter expects there${look}`;
+  return `the exporter could not write it (${err instanceof Error ? err.message : String(err)})`;
+}
+
 class Guids {
   private readonly used = new Set<string>();
   readonly byRecord: Record<string, string> = {};
+  /** While one record is being written (`begin` to `keep` or `undo`): what it claimed, so a failed record gives it all back. */
+  private readonly claimed: string[] = [];
+  private readonly recorded: string[] = [];
+  private open = false;
   constructor(
     readonly ns: string,
     private readonly warn: (s: string) => void,
   ) {}
 
+  begin(): void {
+    this.claimed.length = 0;
+    this.recorded.length = 0;
+    this.open = true;
+  }
+
+  keep(): void {
+    this.open = false;
+  }
+
+  undo(): void {
+    for (const guid of this.claimed) this.used.delete(guid);
+    for (const id of this.recorded) delete this.byRecord[id];
+    this.open = false;
+  }
+
   private claim(guid: string, what: string): string {
     if (this.used.has(guid)) throw new Error(`IFC export made the GlobalId ${guid} twice (${what})`);
     this.used.add(guid);
+    if (this.open) this.claimed.push(guid);
     return guid;
   }
 
@@ -253,6 +311,7 @@ class Guids {
       guid = compressed && !this.used.has(compressed) ? this.claim(compressed, el.id) : this.derived(`element:${el.id}`);
     }
     this.byRecord[el.id] = guid;
+    if (this.open) this.recorded.push(el.id);
     return guid;
   }
 }
@@ -262,6 +321,8 @@ interface Product {
   readonly guid: string;
   /** Its own placement, for ports and children. Null when planned. */
   readonly placement: StepRef | null;
+  /** The class it was counted under as missing from the registry, when it was. */
+  readonly missingClass: string | null;
 }
 
 /** Export a model to IFC 4.3 ADD2 STEP text. Throws only on a writer defect; anything odd in the model is a warning in the report. */
@@ -295,7 +356,24 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
   const guids = new Guids(ns, warn);
   const g = new StepGraph();
   const units = new UnitSet();
-  const index = buildClassIndex(registry, model);
+  let index: ReturnType<typeof buildClassIndex>;
+  try {
+    index = buildClassIndex(registry, model);
+  } catch (err) {
+    // The kernel's class pass reads every part's type, so one stored part type with no definition stops it for the
+    // whole model. Classes are then read without those part types; their parts say why they are left out below.
+    const sound: Record<string, BimElement> = {};
+    const broken: string[] = [];
+    for (const el of Object.values(model.elements)) {
+      const definition: unknown = el.kind === "part_type" ? el.definition : undefined;
+      if (el.kind === "part_type" && (typeof definition !== "object" || definition === null)) broken.push(el.id);
+      else sound[el.id] = el;
+    }
+    if (broken.length === 0) throw err;
+    console.error("[bim-ifc] the class index could not be built with every part type; built without the part types that have no definition", { partTypeIds: broken.slice(0, 10), err });
+    index = buildClassIndex(registry, { elements: sound });
+    for (const id of broken.sort()) warn(`${id}: this part type has no definition stored, so parts of this type can't be written. Load the part type again, then export again.`);
+  }
   const org = organizationOf(model);
   const lastPhase = Math.max(0, org.phases.length - 1);
 
@@ -305,21 +383,81 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
   const byEntity: Record<string, number> = {};
   const counts = { storeys: 0, spaces: 0, zones: 0, systems: 0, circuits: 0, elements: 0, planned: 0, ports: 0, types: 0, assemblies: 0, propertySets: 0, quantitySets: 0 };
 
+  // ---------------------------------------------------------------- one record at a time
+  // A store can hold a record no command would write (an older file, a script, a peer on another release). Each
+  // record's writer runs under `guarded`: when it throws, that record is left out and named in the report, and every
+  // other record is still written.
+  let guarding = false;
+  let dropped = false;
+  /** Records whose own writer failed: later passes (relationships, ports) skip them instead of reporting them again. */
+  const leftOut = new Set<string>();
+  const tallied: string[] = [];
+  const tally = (entity: string) => {
+    byEntity[entity] = (byEntity[entity] ?? 0) + 1;
+    if (guarding) tallied.push(entity);
+  };
+  /**
+   * Runs one record's writer, all or nothing. On a throw: the entities it had added are dropped from the graph (their
+   * handles are never given out again), its GlobalIds, counts and warnings are taken back, the failure is logged and
+   * the report says which record and why. False then; the caller takes back whatever the writer had put in a list of
+   * its own. `what` reads after the record's name: "is" for the record itself, "has its ports" for a part of it.
+   */
+  const guarded = <T extends { readonly id: string; readonly kind: string }>(el: T, write: (el: T) => void, what = "is"): boolean => {
+    const from = g.size;
+    const warned = warnings.length;
+    const before = { ...counts };
+    tallied.length = 0;
+    guarding = true;
+    guids.begin();
+    try {
+      write(el);
+      guids.keep();
+      guarding = false;
+      return true;
+    } catch (err) {
+      guarding = false;
+      console.error(`[bim-ifc] a record's writer threw; the record ${what} left out of the file`, { elementId: el.id, kind: el.kind, err });
+      g.dropFrom(from);
+      guids.undo();
+      warnings.length = warned;
+      Object.assign(counts, before);
+      for (const entity of tallied) {
+        const n = (byEntity[entity] ?? 0) - 1;
+        if (n > 0) byEntity[entity] = n;
+        else delete byEntity[entity];
+      }
+      dropped = true;
+      if (what === "is") leftOut.add(el.id);
+      warn(`${el.id}: this ${recordWords(el)} ${what} left out of the file because ${whyNotWritten(el, err)}. Fix it in the model or draw it again, then export again.`);
+      return false;
+    }
+  };
+
   // ---------------------------------------------------------------- project, contexts, site
   const projectHandle = g.reserve();
   const projectGuid = isUuid(opts.project.id) ? uuidToIfcGuid(opts.project.id) : guids.derived("project");
   const world = g.add("IFCAXIS2PLACEMENT3D", [g.add("IFCCARTESIANPOINT", [list([real(0), real(0), real(0)])]), $, $]);
   const site = siteOf(model);
-  const north = trueNorthInPlan(site);
+  const statedNorth = trueNorthInPlan(site);
+  const northKnown = Number.isFinite(statedNorth.x) && Number.isFinite(statedNorth.y);
+  const north = northKnown ? statedNorth : { x: 0, y: 1 };
   const context = g.add("IFCGEOMETRICREPRESENTATIONCONTEXT", [$, str("Model"), { int: 3 }, real(1e-5), world, g.add("IFCDIRECTION", [list([real(north.x), real(north.y)])])]);
   const bodyContext = g.add("IFCGEOMETRICREPRESENTATIONSUBCONTEXT", [str("Body"), str("Model"), { derived: true }, { derived: true }, { derived: true }, { derived: true }, context, $, en("MODEL_VIEW"), $]);
   const geo = new GeometryWriter(g, bodyContext);
-  if (els["site"]?.kind === "site") {
-    const mc = siteMapConversion(site);
-    const metre = g.add("IFCSIUNIT", [{ derived: true }, en("LENGTHUNIT"), $, en("METRE")]);
-    const crs = g.add("IFCPROJECTEDCRS", [str("MutinyBIM shared site"), str("The project's shared coordinates (survey point and true north as set in MutinyBIM)"), $, $, $, $, metre]);
-    // Eastings and northings are in the CRS unit (metres); Scale takes the file's millimetres to metres.
-    g.add("IFCMAPCONVERSION", [context, crs, real(mc.eastings), real(mc.northings), real(mc.orthogonalHeight), real(mc.xAxisAbscissa), real(mc.xAxisOrdinate), real(0.001)]);
+  const siteRecord = els["site"];
+  if (siteRecord?.kind === "site") {
+    if (!northKnown) warn(`${siteRecord.id}: the site's true north is not a number, so the file is written with plan north as true north. Set true north again, then export again.`);
+    guarded(
+      siteRecord,
+      () => {
+        const mc = siteMapConversion(site);
+        const metre = g.add("IFCSIUNIT", [{ derived: true }, en("LENGTHUNIT"), $, en("METRE")]);
+        const crs = g.add("IFCPROJECTEDCRS", [str("MutinyBIM shared site"), str("The project's shared coordinates (survey point and true north as set in MutinyBIM)"), $, $, $, $, metre]);
+        // Eastings and northings are in the CRS unit (metres); Scale takes the file's millimetres to metres.
+        g.add("IFCMAPCONVERSION", [context, crs, real(mc.eastings), real(mc.northings), real(mc.orthogonalHeight), real(mc.xAxisAbscissa), real(mc.xAxisOrdinate), real(0.001)]);
+      },
+      "has its shared coordinates",
+    );
   }
 
   const siteGuid = els["site"] ? guids.record(els["site"]) : guids.derived("site");
@@ -340,14 +478,16 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
   const levels = elements.filter((e): e is Level => e.kind === "level").sort((a, b) => a.elevationMm - b.elevationMm || byId(a, b));
   const storeys = new Map<string, { readonly ref: StepRef; readonly guid: string; readonly placement: StepRef }>();
   const levelByName = new Map<string, string>();
-  for (const lv of levels) {
+  const writeStorey = (lv: Level): void => {
     const guid = guids.record(lv);
     const placement = geo.placement(buildingPlacement, geo.axis({ x: 0, y: 0, z: lv.elevationMm }));
     const ref = g.add("IFCBUILDINGSTOREY", [str(guid), $, str255(lv.name), $, $, placement, $, $, en("ELEMENT"), real(lv.elevationMm)]);
     storeys.set(lv.id, { ref, guid, placement });
     if (!levelByName.has(lv.name)) levelByName.set(lv.name, lv.id);
     counts.storeys++;
-  }
+  };
+  // What stood on a level that is left out is written in the building instead.
+  for (const lv of levels) guarded(lv, writeStorey);
   aggregate(buildingRef, buildingGuid, levels.map((l) => storeys.get(l.id)?.ref).filter((r): r is StepRef => !!r));
 
   const levelOf = (el: BimElement): string | null => {
@@ -401,9 +541,14 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
   };
   const roomsInSpaces = new Map<string, string>();
   const spaces = elements.filter((e): e is Space => e.kind === "space");
-  for (const sp of spaces) if (sp.bounds.kind === "rooms") for (const r of sp.bounds.roomIds) if (!roomsInSpaces.has(r)) roomsInSpaces.set(r, sp.id);
-  for (const room of elements) {
-    if (room.kind !== "room") continue;
+  /** The rooms a space says it is made of; none when its bounds can't be read (its own writer then says so). */
+  const roomIdsOf = (sp: Space): readonly string[] => {
+    const bounds: unknown = sp.bounds;
+    const ids: unknown = typeof bounds === "object" && bounds !== null && Reflect.get(bounds, "kind") === "rooms" ? Reflect.get(bounds, "roomIds") : null;
+    return Array.isArray(ids) ? ids.filter((r): r is string => typeof r === "string") : [];
+  };
+  for (const sp of spaces) for (const r of roomIdsOf(sp)) if (!roomsInSpaces.has(r)) roomsInSpaces.set(r, sp.id);
+  const writeRoom = (room: Extract<BimElement, { readonly kind: "room" }>): void => {
     const guid = guids.record(room);
     const levelId = levelOf(room);
     const placement = geo.placement(frameOf(levelId), geo.axis({ x: 0, y: 0, z: 0 }));
@@ -419,8 +564,9 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     bag.set("MutinyBIM_Space", { kind: "text", name: "Source", value: "Architect's room" });
     attachSets(ref, guid, room.id, bag);
     if (!roomsInSpaces.has(room.id)) pushChild(levelId, ref);
-  }
-  for (const sp of spaces) {
+  };
+  for (const room of elements) if (room.kind === "room" && !guarded(room, writeRoom)) spaceRefs.delete(room.id);
+  const writeSpace = (sp: Space): void => {
     const guid = guids.record(sp);
     const levelId = sp.levelId && storeys.has(sp.levelId) ? sp.levelId : null;
     const placement = geo.placement(frameOf(levelId), geo.axis({ x: 0, y: 0, z: 0 }));
@@ -430,7 +576,6 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     const ref = g.add("IFCSPACE", [str(guid), $, str255(sp.number), $, $, placement, body ?? $, str255(sp.name), en("ELEMENT"), en("SPACE"), $]);
     spaceRefs.set(sp.id, { ref, guid, levelId });
     counts.spaces++;
-    pushChild(levelId, ref);
     const rooms = sp.bounds.kind === "rooms" ? sp.bounds.roomIds.filter((r) => roomsInSpaces.get(r) === sp.id).map((r) => spaceRefs.get(r)?.ref).filter((r): r is StepRef => !!r) : [];
     aggregate(ref, guid, rooms);
     const bag = new PropertyBag();
@@ -444,6 +589,18 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     bag.set("MutinyBIM_Space", { kind: "text", name: "Origin", value: sp.origin.kind });
     if (sp.block !== undefined) bag.set("MutinyBIM_Space", { kind: "bool", name: "BlockLoad", value: sp.block });
     attachSets(ref, guid, sp.id, bag);
+    pushChild(levelId, ref);
+  };
+  for (const sp of spaces) {
+    if (guarded(sp, writeSpace)) continue;
+    spaceRefs.delete(sp.id);
+    // Its rooms are still in the file: they go under their storey instead of under the space.
+    for (const r of roomIdsOf(sp)) {
+      if (roomsInSpaces.get(r) !== sp.id) continue;
+      roomsInSpaces.delete(r);
+      const room = spaceRefs.get(r);
+      if (room) pushChild(room.levelId, room.ref);
+    }
   }
 
   // ---------------------------------------------------------------- building elements
@@ -497,14 +654,16 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
       return typeof v === "number" && v > 0 ? real(v) : $;
     });
     const ref = g.add(cls.entity.toUpperCase(), [str(guid), $, opt(name), $, opt(cls.objectType), placement ?? $, body ?? $, opt(tag), ...tail]);
-    byEntity[cls.entity] = (byEntity[cls.entity] ?? 0) + 1;
+    tally(cls.entity);
     counts.elements++;
+    let missingClass: string | null = null;
     if (cls.entity === PROXY && cls.classId === BUILDING_FALLBACK_CLASS_ID && "classId" in el && el.classId && !registry.getClass(el.classId)) {
+      missingClass = el.classId;
       missingProxyClasses.set(el.classId, (missingProxyClasses.get(el.classId) ?? 0) + 1);
     }
     if (cls.note && cls.entity === PROXY) warn(`${el.id}: written as ${PROXY} (${cls.note})`);
     else if (cls.note) warn(`${el.id}: ${cls.note}`);
-    const p = { ref, guid, placement };
+    const p = { ref, guid, placement, missingClass };
     products.set(el.id, p);
     return p;
   };
@@ -529,16 +688,7 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     }
   };
 
-  for (const el of elements) {
-    if (NOT_EXPORTED_KINDS.has(el.kind)) {
-      skipped[el.kind] = (skipped[el.kind] ?? 0) + 1;
-      continue;
-    }
-    if (STRUCTURE_KINDS.has(el.kind)) continue;
-    if (el.kind === "grid") {
-      grids.push(el);
-      continue;
-    }
+  const writeBuildingElement = (el: BimElement): void => {
     const resolved = resolveIfcClass(registry, index, el);
     // A separation line bounds rooms and is never built.
     const cls: ResolvedIfcClass = el.kind === "space_separator" ? { ...resolved, entity: "IfcVirtualElement", predefinedType: "BOUNDARY", note: null } : resolved;
@@ -662,7 +812,10 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
         console.error("[bim-ifc] fitting geometry did not resolve; exported as a leg to each port", { fittingId: el.id, err });
         unresolved = true;
       }
-      body ??= geo.legs(el.ports.map((port) => ({ start: { x: 0, y: 0, z: 0 }, end: { x: port.position.x - at.x, y: port.position.y - at.y, z: port.position.z - at.z }, section: sectionOf(port.size) })));
+      // A stored port with no size has no section to sweep: its leg is left out and the report says so.
+      const sized = el.ports.filter((port) => typeof port.size === "object" && port.size !== null);
+      if (!body && sized.length < el.ports.length) warn(`${el.id}: ${el.ports.length - sized.length} of this fitting's ports ${el.ports.length - sized.length === 1 ? "has" : "have"} no size, so no leg is drawn to ${el.ports.length - sized.length === 1 ? "it" : "them"}. Draw the fitting again, then export again.`);
+      body ??= geo.legs(sized.map((port) => ({ start: { x: 0, y: 0, z: 0 }, end: { x: port.position.x - at.x, y: port.position.y - at.y, z: port.position.z - at.z }, section: sectionOf(port.size) })));
       if (!body) warn(unresolved ? `${el.id}: its fitting shape did not resolve and it has no ports with length, so it has no body in the file` : `${el.id}: its fitting has no library body and no ports with length, so it has no body in the file`);
       else if (unresolved) warn(`${el.id}: its fitting shape did not resolve, so it is written as a leg to each port`);
       product = writeElement(el, cls, stringField(el, "mark") ?? stringField(el, "label"), stringField(el, "mark"), placement, body);
@@ -670,7 +823,7 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
       // The board the 3D view draws: its outline, less its holes, from its height up. In its room when it has one.
       const placement = geo.placement(frame, geo.axis({ x: 0, y: 0, z: 0 }));
       if (ceilingSlope(el)) warn(`${el.id}: a sloped ceiling is written flat at its stated height, so its body is only right where that height is measured`);
-      product = writeElement(el, cls, ceilingRole(el).label, null, placement, geo.prism(el.outline, el.heightMm, CEILING_BOARD_MM, el.holes));
+      product = writeElement(el, cls, ceilingRole(el).label, null, placement, geo.prism(el.outline, el.heightMm, CEILING_BOARD_MM, Array.isArray(el.holes) ? el.holes : []));
       hostSpace = el.spaceId && spaceRefs.has(el.spaceId) ? el.spaceId : null;
     } else if (el.kind === "column") {
       const baseLevel = levelId ? els[levelId] : undefined;
@@ -765,14 +918,40 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     }
     organizationSets(bag, el);
     attachSets(product.ref, product.guid, el.id, bag);
+    // Nothing below can throw: an element that fails above is in no list, so leaving it out leaves no trace of it.
     const typical = typicalOfGroup(els, el.groupId);
+    const groupName = ifcOrganizationProperties(model, el)?.group.name;
     if (typical) {
       const t = typicalMembers.get(typical.groupId) ?? { levelId, items: [] };
       t.items.push(product.ref);
       typicalMembers.set(typical.groupId, t);
     } else containIn(levelId, planned ? spaceHint : hostSpace, product.ref);
-    const groupName = ifcOrganizationProperties(model, el)?.group.name;
     if (groupName) push(groupMembers, groupName, product.ref);
+  };
+  for (const el of elements) {
+    if (NOT_EXPORTED_KINDS.has(el.kind)) {
+      skipped[el.kind] = (skipped[el.kind] ?? 0) + 1;
+      continue;
+    }
+    if (STRUCTURE_KINDS.has(el.kind)) continue;
+    if (el.kind === "grid") {
+      grids.push(el);
+      continue;
+    }
+    const from = g.size;
+    if (guarded(el, writeBuildingElement)) continue;
+    // Take back what its writer had registered: the product, its missing-class count, a type it made or joined.
+    const product = products.get(el.id);
+    if (product) {
+      products.delete(el.id);
+      const n = product.missingClass === null ? 0 : (missingProxyClasses.get(product.missingClass) ?? 0);
+      if (product.missingClass !== null && n > 1) missingProxyClasses.set(product.missingClass, n - 1);
+      else if (product.missingClass !== null) missingProxyClasses.delete(product.missingClass);
+    }
+    for (const [key, t] of typeObjects) {
+      if (t.ref.ref > from) typeObjects.delete(key);
+      else while ((t.members[t.members.length - 1]?.ref ?? 0) > from) t.members.pop();
+    }
   }
 
   for (const [, t] of [...typeObjects].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
@@ -785,11 +964,9 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
   const synthetic = new Map<string, { readonly ref: StepRef; readonly guid: string }>();
   const endOf = (key: string): { readonly ref: StepRef; readonly guid: string } | null => products.get(key) ?? synthetic.get(key) ?? null;
   const relationRef = (entity: string, a: { readonly guid: string }, b: { readonly guid: string }): StepValue => str(guids.rel(entity, [a.guid, b.guid]));
-  for (const el of elements) {
-    const rows = ifcRelationRowsFor(el.kind);
-    if (rows.length === 0) continue;
+  const writeRelations = (el: BimElement): void => {
     const owner = products.get(el.id);
-    for (const row of rows) {
+    for (const row of ifcRelationRowsFor(el.kind)) {
       let out: ReturnType<typeof row.relations>;
       try {
         out = row.relations(el, els);
@@ -811,7 +988,7 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
         const placement = owner?.placement ? geo.placement(owner.placement, geo.axis({ x: 0, y: 0, z: 0 })) : null;
         const ref = g.add(o.entity.toUpperCase(), [str(guid), $, opt(o.name), $, $, placement ?? $, $, $, ...tail]);
         synthetic.set(o.key, { ref, guid });
-        byEntity[o.entity] = (byEntity[o.entity] ?? 0) + 1;
+        tally(o.entity);
       }
       for (const r of out.relations) {
         const relating = endOf(r.relating);
@@ -827,44 +1004,71 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
         } else if (r.entity === "IfcRelSpaceBoundary") {
           for (const x of related) g.add("IFCRELSPACEBOUNDARY", [relationRef(r.entity, relating, x), $, $, $, relating.ref, x.ref, $, en(r.physicalOrVirtual ?? "NOTDEFINED"), en(r.internalOrExternal ?? "NOTDEFINED")]);
         } else warn(`${el.id}: ${r.entity} from a relation row isn't written by this exporter`);
-        byEntity[r.entity] = (byEntity[r.entity] ?? 0) + 1;
+        tally(r.entity);
       }
     }
+  };
+  for (const el of elements) {
+    if (leftOut.has(el.id) || ifcRelationRowsFor(el.kind).length === 0) continue;
+    const from = g.size;
+    if (guarded(el, writeRelations, "has its relationships")) continue;
+    for (const [key, made] of synthetic) if (made.ref.ref > from) synthetic.delete(key);
   }
 
   // ---------------------------------------------------------------- space boundaries (2nd level, from each bounded space's facts)
-  for (const sp of spaces) {
-    if (sp.bounds.kind !== "bounded") continue;
+  const writeBoundaries = (sp: Space): void => {
+    if (sp.bounds.kind !== "bounded") return;
     const space = spaceRefs.get(sp.id);
     const facts = spaceBoundaryFacts(model, sp.id);
-    if (!space || !Array.isArray(facts)) continue;
+    if (!space || !Array.isArray(facts)) return;
     for (const f of facts) {
       const element = products.get(f.elementId);
       if (!element) continue;
       const side = f.otherSide.kind === "space" ? "INTERNAL" : f.otherSide.kind === "outside" ? "EXTERNAL" : "NOTDEFINED";
       g.add("IFCRELSPACEBOUNDARY", [str(guids.rel("IfcRelSpaceBoundary", [space.guid, element.guid])), $, $, $, space.ref, element.ref, $, en(f.virtual ? "VIRTUAL" : "PHYSICAL"), en(side)]);
-      byEntity.IfcRelSpaceBoundary = (byEntity.IfcRelSpaceBoundary ?? 0) + 1;
+      tally("IfcRelSpaceBoundary");
     }
-  }
+  };
+  for (const sp of spaces) if (spaceRefs.has(sp.id)) guarded(sp, writeBoundaries, "has its boundaries");
 
   // ---------------------------------------------------------------- grids: one IfcGrid, U and V axes with their tags
   if (grids.length > 0) {
     const point = (p: { readonly x: number; readonly y: number }): StepRef => g.add("IFCCARTESIANPOINT", [list([real(p.x), real(p.y)])]);
     const axis = (gl: GridLine): StepRef => g.add("IFCGRIDAXIS", [str255(gl.label.trim() || gl.id), g.add("IFCPOLYLINE", [list([point(gl.start), point(gl.end)])]), bool(true)]);
-    const u = grids.filter((gl) => gridAxisFamily(gl.start, gl.end) === "U").map(axis);
-    const v = grids.filter((gl) => gridAxisFamily(gl.start, gl.end) === "V").map(axis);
-    const lowest = levels[0]?.id ?? null;
-    const guid = guids.derived("grid");
-    const ref = g.add("IFCGRID", [str(guid), $, str("Grid"), $, $, geo.placement(frameOf(lowest), geo.axis({ x: 0, y: 0, z: 0 })), $, list(u), list(v), $, en("RECTANGULAR")]);
-    byEntity.IfcGrid = (byEntity.IfcGrid ?? 0) + 1;
-    byEntity.IfcGridAxis = (byEntity.IfcGridAxis ?? 0) + u.length + v.length;
-    containIn(lowest, null, ref);
+    // U axes first, then V, each in id order. A grid line that can't be written is left out of both.
+    const axesOf = (family: "U" | "V"): StepRef[] => {
+      const out: StepRef[] = [];
+      for (const gl of grids) {
+        if (leftOut.has(gl.id)) continue;
+        guarded(gl, (line) => {
+          if (gridAxisFamily(line.start, line.end) === family) out.push(axis(line));
+        });
+      }
+      return out;
+    };
+    const axesFrom = g.size;
+    const u = axesOf("U");
+    const v = axesOf("V");
+    const lost = grids.filter((gl) => leftOut.has(gl.id)).length;
+    if (lost > 0 && (u.length === 0 || v.length === 0)) {
+      // An IfcGrid needs an axis each way. The lines left out were the only ones one way, so the rest can't stand as a grid.
+      g.dropFrom(axesFrom);
+      dropped = true;
+      if (u.length + v.length > 0) warn(`The ${u.length + v.length} grid line${u.length + v.length === 1 ? " that could be written is" : "s that could be written are"} left out of the file too, because the grid has no line left in the other direction. Fix the grid lines named above, then export again.`);
+    } else {
+      const lowest = levels[0]?.id ?? null;
+      const guid = guids.derived("grid");
+      const ref = g.add("IFCGRID", [str(guid), $, str("Grid"), $, $, geo.placement(frameOf(lowest), geo.axis({ x: 0, y: 0, z: 0 })), $, list(u), list(v), $, en("RECTANGULAR")]);
+      byEntity.IfcGrid = (byEntity.IfcGrid ?? 0) + 1;
+      byEntity.IfcGridAxis = (byEntity.IfcGridAxis ?? 0) + u.length + v.length;
+      containIn(lowest, null, ref);
+    }
   }
 
   // ---------------------------------------------------------------- typicals as assemblies
-  for (const [groupId, t] of [...typicalMembers].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+  const writeTypical = (groupId: string, t: { readonly levelId: string | null; readonly items: StepRef[] }): void => {
     const ref = typicalOfGroup(els, groupId);
-    if (!ref) continue;
+    if (!ref) return;
     const { spec } = ref;
     const frame = frameOf(t.levelId);
     const typeGuid = guids.derived(`typical-type:${groupId}`);
@@ -894,9 +1098,15 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
       attachSets(inst, guid, `typical:${groupId}:copy:${copy.id}`, bagOf(copy.mark, spec.mark));
       instances.push(inst);
     }
-    for (const inst of instances) containIn(t.levelId, null, inst);
     g.add("IFCRELDEFINESBYTYPE", [str(guids.rel("IfcRelDefinesByType", [typeGuid])), $, $, $, list(instances), assemblyType]);
     counts.assemblies += instances.length;
+    for (const inst of instances) containIn(t.levelId, null, inst);
+  };
+  for (const [groupId, t] of [...typicalMembers].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    const record = els[groupId];
+    if (!record) continue;
+    // Its members are in the file already: without their assembly they stand on their level like any other element.
+    if (!guarded(record, () => writeTypical(groupId, t), "has its assembly and copies")) for (const item of t.items) containIn(t.levelId, null, item);
   }
 
   // ---------------------------------------------------------------- ports and connections
@@ -923,12 +1133,12 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     return s?.kind === "mep_system" ? s.systemKind : undefined;
   };
   const connections: Array<readonly [string, string]> = [];
-  for (const el of elements) {
+  const writePorts = (el: BimElement): void => {
     const host = products.get(el.id);
-    if (!host) continue;
+    if (!host) return;
     if (el.kind === "part") {
       const type = partTypeOf(el);
-      if (!type) continue;
+      if (!type) return;
       for (const c of resolveConnectors(type.definition, el.values)) {
         const placement = host.placement ? geo.placement(host.placement, geo.axis({ x: c.position[0], y: c.position[1], z: c.position[2] })) : null;
         const flow = type.definition.connectors.find((d) => d.id === c.id)?.flowDirection;
@@ -952,6 +1162,15 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
         if (port.link) connections.push([`${el.id}|${port.id}`, `${port.link.elementId}|${port.link.port}`]);
       }
     }
+  };
+  for (const el of elements) {
+    if ((el.kind !== "part" && el.kind !== "run_segment" && el.kind !== "run_fitting") || !products.has(el.id)) continue;
+    const from = g.size;
+    const linked = connections.length;
+    if (guarded(el, writePorts, "has its ports")) continue;
+    connections.length = linked;
+    nests.delete(el.id);
+    for (const [key, port] of ports) if (port.ref.ref > from) ports.delete(key);
   }
   const seenPairs = new Set<string>();
   for (const [a, b] of connections) {
@@ -966,7 +1185,7 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
   }
 
   // Load points: a port for what is connected where no fixture is modelled.
-  for (const lp of elements.filter((e): e is LoadPointElement => e.kind === "load_point")) {
+  const writeLoadPoint = (lp: LoadPointElement): void => {
     const anchor = loadAnchorOf(lp);
     const hostId = lp.attachedPartId && products.has(lp.attachedPartId) ? lp.attachedPartId : anchor.kind === "run_end" && products.has(anchor.hostId) ? anchor.hostId : anchor.kind === "part" && products.has(anchor.partId) ? anchor.partId : null;
     const name = lp.mark ?? (lp.connectionType || lp.id);
@@ -976,14 +1195,6 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     const sysType = carried?.ifc.system === "IfcDistributionSystem" && predefinedTypes("IfcDistributionSystem").has(carried.ifc.predefinedType) ? en(carried.ifc.predefinedType) : $;
     const ref = g.add("IFCDISTRIBUTIONPORT", [str(guid), $, str255(name), $, str("Load point"), $, $, en("SINK"), en(PORT_DOMAIN[carried?.connector ?? ""] ?? "NOTDEFINED"), sysType]);
     counts.ports++;
-    const host = hostId ? products.get(hostId) : undefined;
-    if (host && hostId) {
-      const n = nests.get(hostId) ?? { host, items: [] };
-      n.items.push(ref);
-      nests.set(hostId, n);
-    } else if (anchor.kind === "space") containIn(spaceRefs.get(anchor.id)?.levelId ?? null, anchor.id, ref);
-    else if (anchor.kind === "point") containIn(storeys.has(anchor.levelId) ? anchor.levelId : null, null, ref);
-    else containIn(null, null, ref);
     const bag = new PropertyBag();
     for (const key of [...LEGACY_QUANTITY_KEYS].sort()) {
       const v = lp.values[key];
@@ -996,7 +1207,17 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     if (lp.note) bag.set("MutinyBIM_Load", { kind: "text", name: "Note", value: lp.note });
     if (lp.service) bag.set("MutinyBIM_Load", { kind: "text", name: "Service", value: lp.service });
     attachSets(ref, guid, lp.id, bag);
-  }
+    // Last, and nothing here can throw: a load point that fails above is in no list.
+    const host = hostId ? products.get(hostId) : undefined;
+    if (host && hostId) {
+      const n = nests.get(hostId) ?? { host, items: [] };
+      n.items.push(ref);
+      nests.set(hostId, n);
+    } else if (anchor.kind === "space") containIn(spaceRefs.get(anchor.id)?.levelId ?? null, anchor.id, ref);
+    else if (anchor.kind === "point") containIn(storeys.has(anchor.levelId) ? anchor.levelId : null, null, ref);
+    else containIn(null, null, ref);
+  };
+  for (const lp of elements) if (lp.kind === "load_point") guarded(lp, writeLoadPoint);
   for (const [, n] of [...nests].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
     g.add("IFCRELNESTS", [str(guids.rel("IfcRelNests", [n.host.guid, "ports"])), $, $, $, n.host.ref, list(n.items)]);
   }
@@ -1009,7 +1230,7 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     return spatial ? { entity: "IfcSpatialZone", predefinedType: spatial } : { entity: "IfcSpatialZone", predefinedType: "USERDEFINED", objectType: rawRegistryWords(purpose) };
   };
   const referenced = new Map<string, { readonly structure: StepRef; readonly structureGuid: string; readonly items: StepRef[] }>();
-  for (const z of elements.filter((e): e is Zone => e.kind === "zone")) {
+  const writeZone = (z: Zone): void => {
     const guid = guids.record(z);
     const bounds = zoneBoundsOf(z);
     const home = zoneOf(z.purpose);
@@ -1023,7 +1244,7 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
       const members = bounds.spaceIds.map((id) => spaceRefs.get(id)?.ref).filter((r): r is StepRef => !!r);
       if (members.length > 0) g.add("IFCRELASSIGNSTOGROUP", [str(guids.rel("IfcRelAssignsToGroup", [guid])), $, $, $, list(members), $, ref]);
       attachSets(ref, guid, z.id, bag);
-      continue;
+      return;
     }
     // A derived zone's rule states its own IFC type (a pack's rule too); others go by purpose.
     const rulePt = bounds.kind === "derived" ? derivedRules.get(bounds.rule)?.ifcPredefinedType : undefined;
@@ -1051,12 +1272,13 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     const r = referenced.get(key) ?? { structure: storey?.ref ?? buildingRef, structureGuid: storey?.guid ?? buildingGuid, items: [] };
     r.items.push(ref);
     referenced.set(key, r);
-  }
+  };
+  for (const z of elements) if (z.kind === "zone") guarded(z, writeZone);
 
   // ---------------------------------------------------------------- systems and circuits
   const zonesServedBy = new Map<string, string[]>();
-  for (const z of elements.filter((e): e is Zone => e.kind === "zone")) {
-    if (!z.servedBy) continue;
+  for (const z of elements) {
+    if (z.kind !== "zone" || leftOut.has(z.id) || !z.servedBy) continue;
     const b = zoneBoundsOf(z);
     if (b.kind === "spaces") zonesServedBy.set(z.servedBy, [...(zonesServedBy.get(z.servedBy) ?? []), ...b.spaceIds]);
   }
@@ -1088,9 +1310,15 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
   const partsByRun = new Map<string, string[]>();
   for (const e of elements) {
     if ((e.kind === "run_segment" || e.kind === "run_fitting") && products.has(e.id)) push(runsBySystem, e.systemId, e.id);
-    if (e.kind === "part" && products.has(e.id)) for (const l of Object.values(e.links ?? {})) push(partsByRun, l.elementId, e.id);
+    if (e.kind !== "part" || !products.has(e.id)) continue;
+    // Read as stored: a part whose links can't be read has said so where its ports are written.
+    const links: unknown = e.links;
+    for (const l of typeof links === "object" && links !== null ? Object.values(links) : []) {
+      const runId: unknown = typeof l === "object" && l !== null ? Reflect.get(l, "elementId") : null;
+      if (typeof runId === "string") push(partsByRun, runId, e.id);
+    }
   }
-  for (const sys of elements.filter((e): e is MepSystem => e.kind === "mep_system")) {
+  const writeMepSystem = (sys: MepSystem): void => {
     const guid = guids.record(sys);
     const row = services.byId.get(sys.systemKind);
     if (!row) warn(`${sys.id}: system kind "${sys.systemKind}" is not in the service registry; written as a USERDEFINED distribution system`);
@@ -1101,8 +1329,9 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     const members = [...memberIds].sort().map((id) => products.get(id)?.ref).filter((r): r is StepRef => !!r);
     if (members.length > 0) g.add("IFCRELASSIGNSTOGROUP", [str(guids.rel("IfcRelAssignsToGroup", [guid])), $, $, $, list(members), $, ref]);
     servesSpaces(ref, guid, [...memberIds].flatMap((id) => [...(zonesServedBy.get(id) ?? []), ...(plannedSpaceOf(id) ? [plannedSpaceOf(id) ?? ""] : [])]));
-  }
-  for (const link of elements.filter((e): e is ServiceLink => e.kind === "service_link")) {
+  };
+  for (const sys of elements) if (sys.kind === "mep_system") guarded(sys, writeMepSystem);
+  const writeCircuit = (link: ServiceLink): void => {
     const guid = guids.record(link);
     const adapter = linkAdapterId(link);
     const row = services.rows.find((r) => r.asSystem && r.adapter === adapter);
@@ -1136,7 +1365,8 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     }
     attachSets(ref, guid, link.id, bag);
     servesSpaces(ref, guid, link.members.flatMap((m) => [...(zonesServedBy.get(m.elementId) ?? []), ...(plannedSpaceOf(m.elementId) ? [plannedSpaceOf(m.elementId) ?? ""] : [])]));
-  }
+  };
+  for (const link of elements) if (link.kind === "service_link") guarded(link, writeCircuit);
 
   // ---------------------------------------------------------------- groups, containment, units, project
   for (const [name, members] of [...groupMembers].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
@@ -1154,6 +1384,11 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
   }
   for (const [, r] of [...referenced].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
     g.add("IFCRELREFERENCEDINSPATIALSTRUCTURE", [str(guids.rel("IfcRelReferencedInSpatialStructure", [r.structureGuid])), $, $, $, list(r.items), r.structure]);
+  }
+  // A record left out took its entities with it. Nothing still in the file may point at one of them.
+  if (dropped) {
+    const missing = g.missingReferences();
+    if (missing.length > 0) throw new Error(`IFC export left out a record that the file still points at (#${missing.slice(0, 5).join(", #")})`);
   }
   const unitAssignment = units.write(g);
   g.fill(projectHandle, "IFCPROJECT", [str(projectGuid), $, str255(opts.project.name || "Project"), opt(opts.project.description), $, opt(opts.project.number), $, list([context]), unitAssignment]);
