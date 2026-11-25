@@ -5,14 +5,17 @@ import { elementsOfKind } from "../store";
 import type { BimElement, ElementId, Level, ModelState, ParamValue } from "../types";
 import { IFC_IMPORT_RULE_POINT, type ImportRuleContext, type ImportRuleDef } from "./rule-point";
 import { reverseClassMap } from "./reverse-map";
+import { joinRuns } from "./joins";
 import { importElementId } from "./rules";
-import type { IfcImportPlan, IfcImportReport, ImportClassLine, ImportGroup, ImportProduct, ImportSource } from "./types";
+import type { IfcImportPlan, IfcImportReport, ImportClassLine, ImportGroup, ImportJoin, ImportPort, ImportProduct, ImportSource } from "./types";
 
 /**
  * Plan an import (round 9 I9): every product of a linked model asks the
  * reverse class map for its class and that class's rule; what converts
  * becomes new records carrying `provenance`, what doesn't stays on the
- * linked model with its reason. Pure: reads `model` (Main's head, for levels
+ * linked model with its reason. The joins the file states between converted
+ * records are then made on both sides (`joins.ts`), and the ones that can't
+ * be are listed in the report. Pure: reads `model` (Main's head, for levels
  * and ids) and the pack set bound to it, writes nothing. The model server
  * lands the plan on a new branch (`import_elements`).
  */
@@ -81,6 +84,16 @@ function planInScope(source: ImportSource, opts: PlanImportOptions): IfcImportPl
     const from = "provenance" in r ? r.provenance?.ifcGlobalId : undefined;
     if (from) sourced.add(from);
   };
+  // Where each planned record is, worked out on the first replacement (a file with no joins never builds it).
+  let placeOf: Map<string, number> | null = null;
+  /** A planned record with a link added or taken off, in the place of the one with its id. */
+  const replace = (r: BimElement) => {
+    placeOf ??= new Map(records.map((have, i) => [have.id, i]));
+    const at = placeOf.get(r.id);
+    if (at === undefined) throw new Error(`[bim-kernel/import] ${r.id} isn't a planned record, so it can't be replaced`);
+    records[at] = r;
+    byId.set(r.id, r);
+  };
 
   // Levels: the file's storeys matched to Main's levels (by the storey they came from, then name, then height), new ones made.
   const levels = elementsOfKind(opts.model.elements, "level");
@@ -125,7 +138,25 @@ function planInScope(source: ImportSource, opts: PlanImportOptions): IfcImportPl
   };
 
   const groups = new Map<string, ImportGroup>(source.groups.map((g) => [g.sourceId, g]));
-  const lines = new Map<string, { classId: string | null; label: string; converted: number; linked: Map<string, number> }>();
+  // Connection points by id, read once on the first join asked for (a file with no joins never builds it).
+  let pointOwners: Map<string, ImportJoin> | null = null;
+  const joinedTo = (port: ImportPort): readonly ImportJoin[] => {
+    if (port.connectedTo.length === 0) return [];
+    if (!pointOwners) {
+      pointOwners = new Map();
+      for (const product of source.products) for (const own of product.ports) pointOwners.set(own.id, { product, port: own });
+    }
+    const owners = pointOwners;
+    return port.connectedTo.flatMap((id) => owners.get(id) ?? []);
+  };
+  const convertedRecord = (sourceId: string): BimElement | null => {
+    const id = converted.get(sourceId);
+    return id ? (byId.get(id) ?? null) : null;
+  };
+  const note = (text: string) => {
+    if (notes.size < 200) notes.add(text);
+  };
+  const lines =new Map<string, { classId: string | null; label: string; converted: number; linked: Map<string, number> }>();
   const line = (key: string, classId: string | null, label: string) => {
     let l = lines.get(key);
     if (!l) {
@@ -156,10 +187,8 @@ function planInScope(source: ImportSource, opts: PlanImportOptions): IfcImportPl
       idFor: (sourceId, suffix) => importElementId(opts.sourceKey, sourceId, suffix),
       level: levelFor,
       partition: (level) => ({ level: level.name, zone: "Z1", discipline: cls.discipline }),
-      converted: (sourceId) => {
-        const id = converted.get(sourceId);
-        return id ? (byId.get(id) ?? null) : null;
-      },
+      converted: convertedRecord,
+      joinedTo,
       group: (sourceId) => groups.get(sourceId) ?? null,
       shared: <T extends BimElement>(key: string, make: () => T | string): T | string => {
         const have = shared.get(key);
@@ -171,9 +200,7 @@ function planInScope(source: ImportSource, opts: PlanImportOptions): IfcImportPl
       },
       values: (p) => mappedValues(registry, cls.id, p),
       provenance: (p) => ({ ifcGlobalId: p.sourceId, source: source.id }),
-      note: (text) => {
-        if (notes.size < 200) notes.add(text);
-      },
+      note,
     };
     let result;
     try {
@@ -191,6 +218,7 @@ function planInScope(source: ImportSource, opts: PlanImportOptions): IfcImportPl
     if (own) converted.set(product.sourceId, own.id);
     line(cls.id, cls.id, cls.label).converted += 1;
   }
+  joinRuns({ source, record: (id) => byId.get(id), replace, converted: convertedRecord, joinedTo, level: levelFor, note, toleranceMm: opts.model.settings.connectorToleranceMm });
   for (const u of source.unreadable) {
     const match = u.classHint && map.choose({ entity: u.entity, ...u.classHint });
     const cls = match?.ok ? match.choice.cls : match?.cls;

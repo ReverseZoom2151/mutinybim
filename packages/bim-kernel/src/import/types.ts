@@ -75,11 +75,22 @@ export interface ImportPort {
   readonly connectedTo: readonly string[];
 }
 
+/** The far side of a join the file states: a connection point and the product it is on. */
+export interface ImportJoin {
+  readonly product: ImportProduct;
+  readonly port: ImportPort;
+}
+
 export interface ImportProduct {
   /** The file's stable id for it (an IFC GlobalId). */
   readonly sourceId: string;
   /** The schema's entity name (`IfcWall`). */
   readonly entity: string;
+  /**
+   * The more general entities it also is, nearest first, as far as the reader knows them. A class whose home is one
+   * of them takes the product when no class names its own entity. Absent: none.
+   */
+  readonly generalEntities?: readonly string[];
   readonly predefinedType: string | null;
   readonly objectType: string | null;
   readonly name: string | null;
@@ -137,7 +148,7 @@ export interface ImportSource {
     readonly entity: string;
     readonly count: number;
     readonly reason: string;
-    readonly classHint?: Pick<ImportProduct, "predefinedType" | "objectType">;
+    readonly classHint?: Pick<ImportProduct, "predefinedType" | "objectType" | "generalEntities">;
   }[];
 }
 

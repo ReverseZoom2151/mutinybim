@@ -1,4 +1,5 @@
 import { OUTLINE_WITH_HOLES, type ImportGroup, type ImportPort, type ImportProduct, type ImportSource, type ImportStorey, type ParamValue } from "@permitzip/bim-kernel";
+import { generalEntitiesOf } from "../mapping";
 import { readStep, type ReadEntity, type StepFile, type StepToken } from "../read";
 import { ifcEntityName, isInstantiableEntity, ownAttributes } from "../schema-ifc4x3";
 import { GeometryReader, apply, boundsIn, boundsOf, compose, hostFrame, type Frame } from "./geometry";
@@ -280,6 +281,7 @@ export function readIfcSource(text: string, opts: IfcReadOptions): ImportSource 
     // A user-defined kind named on the type is named in the type's ElementType.
     const objectType = str(e.args[4]) ?? (typed === "USERDEFINED" ? str(type?.args[TYPE_OWN_START - 1]) : null);
     const name = str(e.args[2]);
+    const general = generalEntitiesOf(entity);
     if (!placed) {
       const label = name ? `${name} (${sourceId})` : sourceId;
       let reason = `${label} has no placement reference in the file`;
@@ -288,7 +290,7 @@ export function readIfcSource(text: string, opts: IfcReadOptions): ImportSource 
           ? `${label} refers to #${placementRef.id}, which is not a placement`
           : `the placement of ${label} refers to #${placementRef.id}, which is missing from the file`;
       }
-      unreadable.push({ entity, count: 1, reason, classHint: { predefinedType, objectType } });
+      unreadable.push({ entity, count: 1, reason, classHint: { predefinedType, objectType, ...(general.length > 0 ? { generalEntities: general } : {}) } });
       continue;
     }
     const frame = world(placementRef);
@@ -321,6 +323,7 @@ export function readIfcSource(text: string, opts: IfcReadOptions): ImportSource 
     products.push({
       sourceId,
       entity,
+      ...(general.length > 0 ? { generalEntities: general } : {}),
       predefinedType,
       objectType,
       name,

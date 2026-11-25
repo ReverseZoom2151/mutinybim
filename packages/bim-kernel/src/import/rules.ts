@@ -1,15 +1,17 @@
 import { asElementId } from "../types";
 import { GLOBAL_PARTITION } from "../partition";
-import type { Beam, Column, Component, ElementId, Level, MepSystem, Opening, PartInstance, PartTypeElement, Room, RunDomain, RunSegment, RunSize, Slab, Vec2, Wall } from "../types";
+import type { Beam, Column, Component, ElementId, Level, MepSystem, Opening, PartInstance, PartTypeElement, Room, RunDomain, RunFitting, RunSegment, RunSize, Slab, Vec2, Wall } from "../types";
 import { checkCeilingHole, checkCeilingOutline, type HoleFault } from "../ceilings/outline";
 import { CEILING_HEIGHT_MAX_MM, CEILING_HOLES_MAX, CEILING_OUTLINE_MAX_POINTS, type Ceiling } from "../ceilings/types";
-import { RUN_DOMAINS } from "../routing/types";
-import { connectorDomainOf, sizeFitsDomain } from "../routing/rules";
+import { FITTING_TYPES, RUN_DOMAINS, type FittingType, type HostedOn, type RunPoint, type RunPort } from "../routing/types";
+import { angleBetween, dir3, dist3, dot3, hostedPoints, segmentAxis, segmentLength3, sub3 } from "../routing/geometry";
+import { hasSides, onItsSide } from "../routing/orientation";
+import { connectorDomainOf, fittingLabel, sameSize, sizeFitsDomain, sizeWidth, systemRules, transitionReason } from "../routing/rules";
 import { activeServiceRegistry } from "../services/registry";
 import { PART_CATEGORIES, type PartCategory, type PartTypeDefinition } from "../parts";
 import type { ImportRuleContext, ImportRuleDef } from "./rule-point";
 import { axisAligned, holedPrism, outlineArea, outlineCentre, rectangleAxis, roundPlan, straightSweep, verticalPrism } from "./shape";
-import { OUTLINE_WITH_HOLES, type ImportPoint, type ImportProduct, type ImportRuleResult } from "./types";
+import { OUTLINE_WITH_HOLES, type ImportJoin, type ImportPoint, type ImportPort, type ImportProduct, type ImportRuleResult } from "./types";
 
 /**
  * The kernel's import rules: one per generic kind, reading only geometry and
@@ -328,6 +330,266 @@ const runSegment: ImportRuleDef = {
   },
 };
 
+/** How near two points the file states must be to count as one, mm (records are rounded to 0.1 mm on the way in). */
+const MEET_MM = 1;
+
+// The fitting shapes by their place in `FITTING_TYPES`, so this file spells none of them out.
+const [BEND_SHAPE, TRANSITION_SHAPE, SIDE_BRANCH, THROUGH_BRANCH, ANGLED_BRANCH, CAP_SHAPE] = FITTING_TYPES;
+/** The file's fitting types for a fitting that sits between runs at one point. */
+const POINT_FITTINGS: Readonly<Record<string, FittingType>> = { BEND: BEND_SHAPE, TRANSITION: TRANSITION_SHAPE, OBSTRUCTION: CAP_SHAPE };
+/** The file's fitting type for a fitting where a branch leaves the side of a run. */
+const BRANCH_FITTING = "JUNCTION";
+const BRANCH_SHAPES: readonly FittingType[] = [SIDE_BRANCH, THROUGH_BRANCH, ANGLED_BRANCH];
+
+const NO_PLACE_ON_RUN = "it branches off the side of a run, and the file doesn't say where on that run";
+const RUN_SPLIT_AT_IT = "the run it branches from is cut in two at it in the file, and a branch here sits on one unbroken run";
+
+/** A converted straight piece that the file joins one opening of a fitting to. */
+interface RunMeeting {
+  readonly product: ImportProduct;
+  readonly segment: RunSegment;
+  /** The floor the piece's heights are from, mm from the model's zero. */
+  readonly floor: number;
+  /** Where the file says they meet, from the model's zero. */
+  readonly here: ImportPoint;
+}
+
+function runMeeting(ctx: ImportRuleContext, level: Level, port: ImportPort, far: ImportJoin): RunMeeting | string {
+  const record = ctx.converted(far.product.sourceId);
+  if (!record) return "something it joins stays on the linked model";
+  if (record.kind === "part") return "it joins a part directly, and a part's connection points aren't brought in yet";
+  if (record.kind !== "run_segment") return "it joins something other than a straight run, which isn't read from the file yet";
+  const here = far.port.position ?? port.position;
+  if (!here) return "the file doesn't say where its openings are";
+  return { product: far.product, segment: record, floor: (ctx.level(far.product) ?? level).elevationMm, here };
+}
+
+/** The end of a converted straight piece that one opening of a fitting joins. */
+interface JoinedEnd {
+  readonly product: ImportProduct;
+  readonly segment: RunSegment;
+  readonly end: "start" | "end";
+  /** That end, with its height from the floor asked for. */
+  readonly at: RunPoint;
+  /** Unit vector from that end along the piece: out of the fitting through the opening. */
+  readonly away: RunPoint;
+}
+
+/** The end of the piece at the point the file joins it, heights from `floorMm`; null when that point isn't one of its ends. */
+function endAt(m: RunMeeting, floorMm: number): JoinedEnd | null {
+  const gap = (q: RunPoint) => Math.hypot(q.x - m.here.x, q.y - m.here.y, q.z + m.floor - m.here.z);
+  const end = gap(m.segment.start) <= gap(m.segment.end) ? "start" : "end";
+  const [from, to] = end === "start" ? [m.segment.start, m.segment.end] : [m.segment.end, m.segment.start];
+  if (gap(from) > MEET_MM) return null;
+  return { product: m.product, segment: m.segment, end, at: { x: from.x, y: from.y, z: round(from.z + m.floor - floorMm) }, away: dir3(sub3(to, from)) };
+}
+
+/** Half the size of a piece's section, corner to corner: how far off its centre line a point on its faces can be. */
+function sectionReach(size: RunSize): number {
+  if (size.shape === "rect" || size.shape === "oval") return Math.hypot(size.width, size.height) / 2;
+  return size.shape === "round" ? size.diameter / 2 : 0;
+}
+
+/** How far along the piece, from its start, the file joins it, when that is between its ends; null when it is at an end or off the piece. */
+function alongSide(m: RunMeeting): number | null {
+  const axis = segmentAxis(m.segment);
+  const from = sub3({ x: m.here.x, y: m.here.y, z: m.here.z - m.floor }, m.segment.start);
+  const s = dot3(from, axis);
+  if (s <= MEET_MM || s >= segmentLength3(m.segment) - MEET_MM) return null;
+  const off = Math.hypot(from.x - axis.x * s, from.y - axis.y * s, from.z - axis.z * s);
+  return off <= sectionReach(m.segment.size) + MEET_MM ? s : null;
+}
+
+/** The system a converted run piece is in (made when the piece came in). */
+function systemOfRun(ctx: ImportRuleContext, joined: { readonly product: ImportProduct; readonly segment: RunSegment }): MepSystem | string {
+  const system = systemFor(ctx, joined.product, joined.segment.domain);
+  if (typeof system === "string") return system;
+  return system.id === joined.segment.systemId ? system : "the system of the run it joins couldn't be read from the file";
+}
+
+const ID_WORD = /^[A-Za-z0-9_-]{1,40}$/;
+
+/** Ids for a fitting's openings: the file's names for them when they can be ids (`a`, `b`), else letters in the file's order. */
+function openingIds(ports: readonly ImportPort[]): string[] {
+  const names = ports.map((port) => port.name?.trim() ?? "");
+  const usable = names.every((n) => ID_WORD.test(n)) && new Set(names).size === names.length;
+  return usable ? names : ports.map((_, i) => String.fromCharCode(97 + i));
+}
+
+/** The fields every imported fitting carries; it is filed with the run it joins (its class is every discipline's, so it has none of its own). */
+function fittingBase(ctx: ImportRuleContext, p: ImportProduct, level: Level, run: RunSegment, system: MepSystem) {
+  return {
+    id: ctx.idFor(p.sourceId),
+    version: 0,
+    authoredRev: {},
+    partition: { ...ctx.partition(level), ...(run.partition ? { discipline: run.partition.discipline } : {}) },
+    provenance: ctx.provenance(p),
+    kind: "run_fitting" as const,
+    domain: run.domain,
+    systemId: system.id,
+    levelId: level.id,
+  };
+}
+
+/** A bend, a transition or an end cap, read from the straight pieces its openings join: their ends, directions and sizes. */
+function pointFitting(p: ImportProduct, ctx: ImportRuleContext, level: Level, shape: FittingType): ImportRuleResult {
+  const ends: JoinedEnd[] = [];
+  for (const port of p.ports) {
+    const joins = ctx.joinedTo(port);
+    const [far] = joins;
+    if (!far) return fail("the file doesn't say what one of its openings joins");
+    if (joins.length > 1) return fail("one of its openings joins more than one thing");
+    const meeting = runMeeting(ctx, level, port, far);
+    if (typeof meeting === "string") return fail(meeting);
+    const end = endAt(meeting, level.elevationMm);
+    if (!end) return fail("it doesn't meet the end of a run it joins");
+    ends.push(end);
+  }
+  const [a, b] = ends;
+  if (!a) return fail("the file doesn't say what its openings join");
+  const what = shape === BEND_SHAPE ? "a bend" : shape === TRANSITION_SHAPE ? "a transition" : "an end cap";
+  const openings = shape === CAP_SHAPE ? 1 : 2;
+  if (ends.length !== openings) return fail(`it is written as ${what}, which has ${openings === 1 ? "one opening" : "two openings"}, but the file gives it ${ends.length}`);
+  if (ends.some((e) => e.segment.systemId !== a.segment.systemId)) return fail("it joins runs of different systems");
+  if (ctx.fields.domain !== undefined && ctx.fields.domain !== a.segment.domain) return fail(`${ctx.cls.label} doesn't take the kind of run it joins`);
+  const system = systemOfRun(ctx, a);
+  if (typeof system === "string") return fail(system);
+  let angleDeg: number | undefined;
+  if (b) {
+    if (dist3(a.at, b.at) > MEET_MM) return fail("its openings aren't at one point, the way a fitting here meets its runs");
+    const between = angleBetween(a.away, b.away);
+    const same = sameSize(a.segment.size, b.segment.size);
+    if (shape === BEND_SHAPE) {
+      if (180 - between < 0.5) return fail("it is written as a bend, but the runs it joins run straight through");
+      if (!same && !sameSize(onItsSide(a.segment.size), b.segment.size)) return fail("it is written as a bend, but the runs it joins differ in size");
+      angleDeg = round(180 - between);
+    } else {
+      if (between < 179.5) return fail("it is written as a transition, but the runs it joins turn there");
+      if (same) return fail("it is written as a transition, but the runs it joins are the same size");
+      if (transitionReason(a.segment.size, b.segment.size)) return fail("one transition here can't join the two sizes it is between");
+    }
+  }
+  const ids = openingIds(p.ports);
+  const ports: RunPort[] = ends.map((e, i) => ({ id: ids[i] ?? String(i), position: e.at, direction: e.away, size: e.segment.size, link: { elementId: e.segment.id, port: e.end } }));
+  const record: RunFitting = {
+    ...fittingBase(ctx, p, level, a.segment, system),
+    fittingType: shape,
+    label: (p.name?.trim() || fittingLabel(shape, systemRules(system.systemKind), null, angleDeg)).slice(0, 120),
+    position: a.at,
+    ...(angleDeg !== undefined ? { angleDeg } : {}),
+    ports,
+  };
+  return { ok: true, records: [record] };
+}
+
+/**
+ * Where a branch sits on the run it leaves: how far along, and which way out (a side, the top or bottom, or a level
+ * direction off a riser), worked out from the end of the branch's own first piece.
+ */
+function hostedOn(host: RunSegment, s: number, branch: JoinedEnd): HostedOn | string {
+  const axis = segmentAxis(host);
+  const along = Math.round(s * 1000) / 1000;
+  const plan = Math.hypot(axis.x, axis.y);
+  if (plan < 1e-6) {
+    const out = Math.hypot(branch.away.x, branch.away.y);
+    if (out < 1e-6) return "its branch leaves a riser straight up or down, and a branch here leaves a riser level";
+    return { segmentId: host.id, s: along, side: 1, dir: { x: Math.round((branch.away.x / out) * 1e6) / 1e6, y: Math.round((branch.away.y / out) * 1e6) / 1e6 } };
+  }
+  const from = sub3(branch.at, { x: host.start.x + axis.x * along, y: host.start.y + axis.y * along, z: host.start.z + axis.z * along });
+  const left = { x: -axis.y, y: axis.x, z: 0 };
+  if (Math.abs(branch.away.z) > Math.hypot(branch.away.x, branch.away.y)) {
+    const up = branch.away.z > 0 ? 1 : -1;
+    const t = round((dot3(from, left) / (plan * plan)) * up);
+    return { segmentId: host.id, s: along, side: 1, face: up > 0 ? "top" : "bottom", ...(t !== 0 ? { t } : {}) };
+  }
+  const leftward = dot3(branch.away, left);
+  if (Math.abs(leftward) < 1e-6) return "its branch runs along the run it leaves, not out of its side";
+  const side = leftward > 0 ? 1 : -1;
+  const t = round(-side * from.z);
+  return { segmentId: host.id, s: along, side, ...(t !== 0 ? { t } : {}) };
+}
+
+/**
+ * A fitting where a branch leaves the side of a run. The file says which run and where by a connection point on that
+ * run between its ends, joined to the fitting: the run it is on is the host, and the point's place along it is the
+ * distance. The fitting has one opening, the branch.
+ */
+function branchFitting(p: ImportProduct, ctx: ImportRuleContext, level: Level): ImportRuleResult {
+  const sides: Array<{ readonly meeting: RunMeeting; readonly s: number }> = [];
+  const ends: Array<{ readonly port: ImportPort; readonly meeting: RunMeeting }> = [];
+  for (const port of p.ports) {
+    for (const far of ctx.joinedTo(port)) {
+      const meeting = runMeeting(ctx, level, port, far);
+      if (typeof meeting === "string") return fail(meeting);
+      const s = alongSide(meeting);
+      if (s !== null) sides.push({ meeting, s });
+      else ends.push({ port, meeting });
+    }
+  }
+  const [on] = sides;
+  if (!on) return fail(ends.length > 1 ? RUN_SPLIT_AT_IT : NO_PLACE_ON_RUN);
+  if (sides.length > 1) return fail("the file puts it on the side of more than one run");
+  const [out] = ends;
+  if (!out) return fail("the file joins nothing to its branch");
+  if (ends.length > 1) return fail("it has more than one branch, and a branch fitting here has one");
+  const host = on.meeting.segment;
+  // A branch fitting's place follows its host, so it is on the host's level and its heights are from that floor.
+  const hostLevel = ctx.level(on.meeting.product) ?? level;
+  const branch = endAt(out.meeting, hostLevel.elevationMm);
+  if (!branch) return fail("its branch doesn't meet the end of the run joined to it");
+  if (branch.segment.id === host.id) return fail("the file joins its branch to the run it sits on");
+  if (branch.segment.systemId !== host.systemId) return fail("it joins runs of different systems");
+  if (ctx.fields.domain !== undefined && ctx.fields.domain !== host.domain) return fail(`${ctx.cls.label} doesn't take the kind of run it joins`);
+  const system = systemOfRun(ctx, on.meeting);
+  if (typeof system === "string") return fail(system);
+  const rules = systemRules(system.systemKind);
+  const lie = sub3(host.end, host.start);
+  const level0 = Math.abs(lie.z) < 0.01;
+  const plumb = Math.hypot(lie.x, lie.y) < 0.01;
+  // The same limit the model checks: off a level run or a round riser (pipe has its own checks, and takes them pitched too).
+  if (host.domain !== "pipe" && !level0 &&!(plumb && !hasSides(host.size))) return fail(plumb ? "it leaves a riser with flat sides, and a branch here leaves a level run or a round riser" : "it leaves a sloped run, and a branch here leaves a level run or a round riser");
+  const wide = sizeWidth(branch.segment.size) - sizeWidth(host.size);
+  if (rules.branchMayEqualTrunk ? wide > 0.5 : wide > -0.5) return fail(rules.branchMayEqualTrunk ? "its branch is larger than the run it leaves" : "its branch is as wide as the run it leaves, and a branch here is narrower");
+  const hosted = hostedOn(host, on.s, branch);
+  if (typeof hosted === "string") return fail(hosted);
+  const at = hostedPoints(host, hosted.s, hosted.side, hosted.dir, hosted.face, hosted.t);
+  if (dist3(at.branch, branch.at) > MEET_MM) return fail("its branch doesn't start on the face of the run it leaves");
+  const name = p.name?.trim() ?? "";
+  // The file has one type for every branch fitting: its name says which when it is one of this system's own words, else the system's usual one.
+  const shape = BRANCH_SHAPES.find((type) => fittingLabel(type, rules, branch.segment.size).toLowerCase() === name.toLowerCase()) ?? rules.branch;
+  const portName = out.port.name?.trim() ?? "";
+  const record: RunFitting = {
+    ...fittingBase(ctx, p, hostLevel, host, system),
+    fittingType: shape,
+    label: (name || fittingLabel(shape, rules, branch.segment.size)).slice(0, 120),
+    position: at.onAxis,
+    ports: [{ id: ID_WORD.test(portName) ? portName : "branch", position: at.branch, direction: at.outward, size: branch.segment.size, link: { elementId: branch.segment.id, port: branch.end } }],
+    host: hosted,
+  };
+  return { ok: true, records: [record] };
+}
+
+/**
+ * A fitting on converted runs, read from what the file joins its openings to. Between runs at a point: a bend, a
+ * transition or an end cap. On the side of a run: a branch fitting. It links to the straight pieces; the plan writes
+ * the links back on them (`joins.ts`). Its make (the library family) isn't in the file, so the system's default applies.
+ */
+const runFitting: ImportRuleDef = {
+  id: "kernel.run_fitting",
+  label: "Fittings on converted runs",
+  forKinds: ["run_fitting"],
+  order: 20,
+  convert(p, ctx) {
+    const level = needLevel(ctx, p);
+    if (typeof level === "string") return fail(level);
+    const type = p.predefinedType ?? "";
+    const shape = POINT_FITTINGS[type];
+    if (!shape && type !== BRANCH_FITTING) return fail("it is a kind of fitting that isn't read from the file yet");
+    if (p.ports.every((port) => ctx.joinedTo(port).length === 0)) return fail("the file doesn't say what its openings join");
+    return shape ? pointFitting(p, ctx, level, shape) : branchFitting(p, ctx, level);
+  },
+};
+
 function isPartCategory(v: unknown): v is PartCategory {
   return typeof v === "string" && (PART_CATEGORIES as readonly string[]).includes(v);
 }
@@ -474,7 +736,7 @@ const component: ImportRuleDef = {
   },
 };
 
-export const KERNEL_IMPORT_RULES: readonly ImportRuleDef[] = [wall, slab, ceiling, room, column, beam, opening, runSegment, part, component];
+export const KERNEL_IMPORT_RULES: readonly ImportRuleDef[] = [wall, slab, ceiling, room, column, beam, opening, runSegment, runFitting, part, component];
 
 /** An element id for imported records: `imp.<source>.<GlobalId>[.<suffix>]`, GlobalId's `$` as `-` (outside its alphabet, so ids stay distinct). */
 export function importElementId(sourceKey: string, sourceId: string, suffix?: string): ElementId {
