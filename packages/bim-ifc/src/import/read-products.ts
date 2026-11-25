@@ -1,4 +1,4 @@
-import { OUTLINE_WITH_HOLES, type ImportGroup, type ImportPort, type ImportProduct, type ImportSource, type ImportStorey, type ParamValue } from "@permitzip/bim-kernel";
+import { OUTLINE_WITH_HOLES, type ImportGroup, type ImportPort, type ImportPortSize, type ImportProduct, type ImportSource, type ImportStorey, type ParamValue } from "@permitzip/bim-kernel";
 import { readStep, type ReadEntity, type StepFile, type StepToken } from "../read";
 import { ifcEntityName, isInstantiableEntity, ownAttributes } from "../schema-ifc4x3";
 import { GeometryReader, apply, boundsIn, boundsOf, compose, hostFrame, type Frame } from "./geometry";
@@ -86,20 +86,26 @@ export function lengthScale(file: StepFile): number {
   const project = [...file.entities.values()].find((e) => e.type === "IFCPROJECT");
   const assignment = project ? file.entities.get(refs(project.args[8])[0] ?? -1) : undefined;
   for (const id of refs(assignment?.args[0])) {
-    const u = file.entities.get(id);
-    if (!u) continue;
-    if (u.type === "IFCSIUNIT" && enumOf(u.args[1]) === "LENGTHUNIT") return siScale(u);
-    if (u.type === "IFCCONVERSIONBASEDUNIT" && enumOf(u.args[1]) === "LENGTHUNIT") {
-      const name = (str(u.args[2]) ?? "").toUpperCase();
-      if (name === "FOOT" || name === "FEET") return 304.8;
-      if (name === "INCH") return 25.4;
-      const measure = file.entities.get(refs(u.args[3])[0] ?? -1);
-      const factor = measure ? value(measure.args[0]) : null;
-      const unit = measure ? file.entities.get(refs(measure.args[1])[0] ?? -1) : undefined;
-      if (typeof factor === "number" && unit?.type === "IFCSIUNIT") return factor * siScale(unit);
-    }
+    const scale = lengthUnitScale(file, file.entities.get(id));
+    if (scale !== null) return scale;
   }
   return 1000;
+}
+
+/** Millimetres per one of a length unit (SI, or one converted from SI: feet, inches). Null: not a length unit this reads. */
+function lengthUnitScale(file: StepFile, u: ReadEntity | undefined): number | null {
+  if (!u) return null;
+  if (u.type === "IFCSIUNIT" && enumOf(u.args[1]) === "LENGTHUNIT") return siScale(u);
+  if (u.type === "IFCCONVERSIONBASEDUNIT" && enumOf(u.args[1]) === "LENGTHUNIT") {
+    const name = (str(u.args[2]) ?? "").toUpperCase();
+    if (name === "FOOT" || name === "FEET") return 304.8;
+    if (name === "INCH") return 25.4;
+    const measure = file.entities.get(refs(u.args[3])[0] ?? -1);
+    const factor = measure ? value(measure.args[0]) : null;
+    const unit = measure ? file.entities.get(refs(measure.args[1])[0] ?? -1) : undefined;
+    if (typeof factor === "number" && unit?.type === "IFCSIUNIT") return factor * siScale(unit);
+  }
+  return null;
 }
 
 function siScale(u: ReadEntity): number {
@@ -107,6 +113,15 @@ function siScale(u: ReadEntity): number {
   const per: Readonly<Record<string, number>> = { MILLI: 1, CENTI: 10, DECI: 100, KILO: 1e6 };
   return prefix ? (per[prefix] ?? 1000) : 1000;
 }
+
+/**
+ * What a port connects to, from its PredefinedType (IfcDistributionPortTypeEnum): the connector id the exporter
+ * writes that word for (`PORT_DOMAIN` in export.ts, read the other way).
+ */
+const PORT_CONNECTS: Readonly<Record<string, string>> = { DUCT: "duct", PIPE: "pipe", CABLE: "electrical", CABLECARRIER: "conduit" };
+
+/** The standard port property sets a size is read from (`Pset_DistributionPortTypeDuct`, `…TypePipe` and their kin). */
+const PORT_SETS = "Pset_DistributionPort";
 
 /** A predefined type that says nothing: left out, or NOTDEFINED. */
 const unset = (predefined: string | null): boolean => predefined === null || predefined === "NOTDEFINED";
@@ -204,17 +219,22 @@ export function readIfcSource(text: string, opts: IfcReadOptions): ImportSource 
     const name = materialName(file, refs(r.args[5])[0] ?? -1);
     if (name) for (const o of refs(r.args[4])) materialOf.set(o, name);
   }
+  // A port is on its product by nesting (IFC4 on) or by the older port-to-element relation; a file may say both.
   const portsOf = new Map<number, number[]>();
+  const portOn = (owner: number, port: number) => {
+    const have = portsOf.get(owner);
+    if (!have) portsOf.set(owner, [port]);
+    else if (!have.includes(port)) have.push(port);
+  };
   for (const r of all("IFCRELNESTS")) {
     const owner = refs(r.args[4])[0];
     if (owner === undefined) continue;
-    const ports = refs(r.args[5]).filter((id) => file.entities.get(id)?.type === "IFCDISTRIBUTIONPORT");
-    if (ports.length > 0) portsOf.set(owner, [...(portsOf.get(owner) ?? []), ...ports]);
+    for (const id of refs(r.args[5])) if (file.entities.get(id)?.type === "IFCDISTRIBUTIONPORT") portOn(owner, id);
   }
   for (const r of all("IFCRELCONNECTSPORTTOELEMENT")) {
     const port = refs(r.args[4])[0];
     const owner = refs(r.args[5])[0];
-    if (port !== undefined && owner !== undefined) portsOf.set(owner, [...(portsOf.get(owner) ?? []), port]);
+    if (port !== undefined && owner !== undefined && file.entities.get(port)?.type === "IFCDISTRIBUTIONPORT") portOn(owner, port);
   }
   const joined = new Map<number, number[]>();
   for (const r of all("IFCRELCONNECTSPORTS")) {
@@ -253,6 +273,55 @@ export function readIfcSource(text: string, opts: IfcReadOptions): ImportSource 
     if (type) read(refs(type.args[5]));
     read(psetsOf.get(id) ?? []);
     return out;
+  };
+
+  /** A port's opening from the standard port property sets: lengths in the file's unit, or in the property's own. */
+  const portSize = (pid: number): ImportPortSize | null => {
+    const lengths: Record<string, number> = {};
+    for (const p of psetsOf.get(pid) ?? []) {
+      const set = file.entities.get(p);
+      if (set?.type !== "IFCPROPERTYSET" || !(str(set.args[2]) ?? "").startsWith(PORT_SETS)) continue;
+      for (const propId of refs(set.args[4])) {
+        const prop = file.entities.get(propId);
+        if (prop?.type !== "IFCPROPERTYSINGLEVALUE") continue;
+        const key = str(prop.args[0]);
+        const v = value(prop.args[2]);
+        if (!key || typeof v !== "number" || !(v > 0)) continue;
+        lengths[key] ??= v * (lengthUnitScale(file, file.entities.get(refs(prop.args[3])[0] ?? -1)) ?? scale);
+      }
+    }
+    const { NominalWidth: width, NominalHeight: height } = lengths;
+    const diameter = lengths.NominalDiameter ?? lengths.OuterDiameter;
+    if (diameter !== undefined) return { shape: "round", diameter };
+    if (width !== undefined && height !== undefined) return { shape: "rect", width, height };
+    // A width alone is a round opening's diameter, as the standard set words it.
+    return width !== undefined ? { shape: "round", diameter: width } : null;
+  };
+  const readPort = (pid: number): ImportPort[] => {
+    const port = file.entities.get(pid);
+    const id = port ? globalIdOf(port) : null;
+    if (!port || !id) return [];
+    // Only a local placement says where a port is: with none, or on a grid or an alignment, it has no position here.
+    const placed = geo.entity(port.args[5]);
+    const frame = placed?.type === "IFCLOCALPLACEMENT" ? world(port.args[5]) : null;
+    // Its placement's own z axis is the way it faces and its own x axis runs along its width, read only where the file writes them out.
+    const own = frame ? geo.entity(placed?.args[1]) : null;
+    const stated = (i: number): boolean => own?.type === "IFCAXIS2PLACEMENT3D" && geo.entity(own.args[i])?.type === "IFCDIRECTION";
+    const systemType = enumOf(port.args[9]);
+    return [
+      {
+        id,
+        name: str(port.args[2]),
+        position: frame ? frame.o : null,
+        flow: enumOf(port.args[7]),
+        connectedTo: (joined.get(pid) ?? []).flatMap((j) => gid(j) ?? []),
+        direction: frame && stated(1) ? frame.z : null,
+        across: frame && stated(2) ? frame.x : null,
+        domain: PORT_CONNECTS[enumOf(port.args[8]) ?? ""] ?? null,
+        systemType: unset(systemType) ? null : systemType,
+        size: portSize(pid),
+      },
+    ];
   };
 
   const products: ImportProduct[] = [];
@@ -309,13 +378,7 @@ export function readIfcSource(text: string, opts: IfcReadOptions): ImportSource 
     }
     const widthIndex = ownIndex(entity, "OverallWidth");
     const heightIndex = ownIndex(entity, "OverallHeight");
-    const ports: ImportPort[] = (portsOf.get(e.id) ?? []).flatMap((pid) => {
-      const port = file.entities.get(pid);
-      const id = port ? globalIdOf(port) : null;
-      if (!port || !id) return [];
-      const at = port.args[5]?.kind === "ref" ? apply(world(port.args[5]), { x: 0, y: 0, z: 0 }) : null;
-      return [{ id, name: str(port.args[2]), position: at, flow: enumOf(port.args[7]), connectedTo: (joined.get(pid) ?? []).flatMap((j) => gid(j) ?? []) }];
-    });
+    const ports = (portsOf.get(e.id) ?? []).flatMap(readPort);
     const hostId = filledHost.get(e.id);
     const openings = openingsIn.get(e.id) ?? 0;
     products.push({

@@ -6,10 +6,11 @@ import { CEILING_HEIGHT_MAX_MM, CEILING_HOLES_MAX, CEILING_OUTLINE_MAX_POINTS, t
 import { RUN_DOMAINS } from "../routing/types";
 import { connectorDomainOf, sizeFitsDomain } from "../routing/rules";
 import { activeServiceRegistry } from "../services/registry";
-import { PART_CATEGORIES, type PartCategory, type PartTypeDefinition } from "../parts";
+import { BUILTIN_CONNECTOR_IDS } from "../services/builtin";
+import { PART_CATEGORIES, connectorSchema, type PartCategory, type PartConnector, type PartTypeDefinition } from "../parts";
 import type { ImportRuleContext, ImportRuleDef } from "./rule-point";
 import { axisAligned, holedPrism, outlineArea, outlineCentre, rectangleAxis, roundPlan, straightSweep, verticalPrism } from "./shape";
-import { OUTLINE_WITH_HOLES, type ImportPoint, type ImportProduct, type ImportRuleResult } from "./types";
+import { OUTLINE_WITH_HOLES, type ImportGroup, type ImportPoint, type ImportPort, type ImportProduct, type ImportRuleResult } from "./types";
 
 /**
  * The kernel's import rules: one per generic kind, reading only geometry and
@@ -261,23 +262,30 @@ function isRunDomain(v: unknown): v is RunDomain {
   return typeof v === "string" && (RUN_DOMAINS as readonly string[]).includes(v);
 }
 
+type ServiceRow = ReturnType<typeof activeServiceRegistry>["rows"][number];
+
+/** The registered system kind a file group reads as: the one whose IFC home and words match it best. `connector`: only among the kinds that connector carries. */
+function systemRowOf(group: ImportGroup, connector: string | null): ServiceRow | null {
+  const words = `${group.name ?? ""} ${group.objectType ?? ""}`.toLowerCase();
+  let best: { row: ServiceRow; score: number } | null = null;
+  for (const row of activeServiceRegistry().rows) {
+    if (!row.asSystem || (connector !== null && row.connector !== connector)) continue;
+    let score = 0;
+    if (group.predefinedType && row.ifc.predefinedType === group.predefinedType) score += 2;
+    if (group.objectType && row.ifc.objectType && row.ifc.objectType.toLowerCase() === group.objectType.toLowerCase()) score += 2;
+    if (row.label.toLowerCase().split(/\s+/).every((w) => words.includes(w))) score += 3;
+    if (score > 0 && (!best || score > best.score)) best = { row, score };
+  }
+  return best?.row ?? null;
+}
+
 /** The system a run's file group becomes: the registered system kind whose IFC home and words match it. */
 function systemFor(ctx: ImportRuleContext, p: ImportProduct, domain: RunDomain): MepSystem | string {
   const groupId = p.groupIds.find((id) => ctx.group(id) !== null);
   const group = groupId ? ctx.group(groupId) : null;
   if (!group || !groupId) return "the file doesn't put it in a system";
   return ctx.shared<MepSystem>(`system:${groupId}`, () => {
-    const connector = connectorDomainOf(domain);
-    const words = `${group.name ?? ""} ${group.objectType ?? ""}`.toLowerCase();
-    let best: { id: string; score: number } | null = null;
-    for (const row of activeServiceRegistry().rows) {
-      if (!row.asSystem || row.connector !== connector) continue;
-      let score = 0;
-      if (group.predefinedType && row.ifc.predefinedType === group.predefinedType) score += 2;
-      if (group.objectType && row.ifc.objectType && row.ifc.objectType.toLowerCase() === group.objectType.toLowerCase()) score += 2;
-      if (row.label.toLowerCase().split(/\s+/).every((w) => words.includes(w))) score += 3;
-      if (score > 0 && (!best || score > best.score)) best = { id: row.id, score };
-    }
+    const best = systemRowOf(group, connectorDomainOf(domain));
     if (!best) return `no registered system kind matches its system "${group.name ?? groupId}"`;
     const record: MepSystem = {
       id: ctx.idFor(groupId),
@@ -338,6 +346,8 @@ interface PartSeat {
   readonly rotationDeg: number;
   /** Its shape's box from that point, along the part's own axes. */
   readonly box: { readonly min: ImportPoint; readonly max: ImportPoint };
+  /** The part's own axes in the host frame (unit vectors): what is at that point is measured along these. */
+  readonly axes: { readonly x: ImportPoint; readonly y: ImportPoint; readonly z: ImportPoint };
   /** Whether that is the file's own placement, and why not when the file had one, for the report. */
   readonly own: boolean;
   readonly why: string | null;
@@ -358,7 +368,7 @@ const SEAT_REACH_MM = 1;
 function partSeat(p: ImportProduct, world: { readonly min: ImportPoint; readonly max: ImportPoint }): PartSeat {
   const boxed = (why: string | null): PartSeat => {
     const origin = { x: (world.min.x + world.max.x) / 2, y: (world.min.y + world.max.y) / 2, z: world.min.z };
-    return { origin, rotationDeg: 0, own: false, why, box: { min: { x: world.min.x - origin.x, y: world.min.y - origin.y, z: 0 }, max: { x: world.max.x - origin.x, y: world.max.y - origin.y, z: world.max.z - origin.z } } };
+    return { origin, rotationDeg: 0, own: false, why, axes: HOST_AXES, box: { min: { x: world.min.x - origin.x, y: world.min.y - origin.y, z: 0 }, max: { x: world.max.x - origin.x, y: world.max.y - origin.y, z: world.max.z - origin.z } } };
   };
   const own = p.placement;
   if (!own?.bounds) return boxed(null);
@@ -366,15 +376,245 @@ function partSeat(p: ImportProduct, world: { readonly min: ImportPoint; readonly
   const { min, max } = own.bounds;
   if (min.x > SEAT_REACH_MM || max.x < -SEAT_REACH_MM || min.y > SEAT_REACH_MM || max.y < -SEAT_REACH_MM) return boxed("its insertion point is away from its shape in the file, so it sits at the middle of its box, not turned");
   const deg = Math.round(((Math.atan2(own.xAxis.y, own.xAxis.x) * 180) / Math.PI) * 1000) / 1000;
-  return { origin: own.origin, rotationDeg: ((deg % 360) + 360) % 360, box: own.bounds, own: true, why: null };
+  const { xAxis: x, zAxis: z } = own;
+  const y = { x: z.y * x.z - z.z * x.y, y: z.z * x.x - z.x * x.z, z: z.x * x.y - z.y * x.x };
+  return { origin: own.origin, rotationDeg: ((deg % 360) + 360) % 360, box: own.bounds, own: true, why: null, axes: { x, y, z } };
 }
 
-/** Whether a part type made here is this box: the same centre and size from its own point. */
-function hasBox(type: PartTypeElement, centre: ImportPoint, size: ImportPoint): boolean {
+const HOST_AXES: PartSeat["axes"] = { x: { x: 1, y: 0, z: 0 }, y: { x: 0, y: 1, z: 0 }, z: { x: 0, y: 0, z: 1 } };
+
+/** Whether a part type made here is this box with these connectors: the same centre and size from its own point, the same connection points. */
+function hasShape(type: PartTypeElement, centre: ImportPoint, size: ImportPoint, connectors: readonly PartConnector[]): boolean {
   const box = type.definition.geometry[0];
   if (box?.kind !== "box") return false;
   const want = [centre.x, centre.y, centre.z, size.x, size.y, size.z];
-  return [...box.center, ...box.size].every((v, i) => v === want[i]);
+  return [...box.center, ...box.size].every((v, i) => v === want[i]) && connectorsKey(type.definition.connectors) === connectorsKey(connectors);
+}
+
+/** A part type's connectors as one text, whatever order they are in: two products of one file type share a part type only while theirs match. */
+function connectorsKey(connectors: readonly PartConnector[]): string {
+  return connectors.map((c) => JSON.stringify(c)).sort().join("|");
+}
+
+/** The most connectors a part type holds (`partTypeDefinitionSchema`). */
+const CONNECTORS_MAX = 24;
+/** The system kind a connector takes when nothing says what it carries (the registry's own row). */
+const UNKNOWN_SYSTEM_KIND = "other";
+/** Which way the file says a port's system flows through it, seen from the part. */
+const FLOW_DIRECTIONS: Readonly<Record<string, NonNullable<PartConnector["flowDirection"]>>> = { SINK: "in", SOURCE: "out", SOURCEANDSINK: "bidirectional" };
+
+const NO_POSITION = "no position in the file";
+const NO_KIND = "nothing in the file says what it connects to";
+
+const along = (v: ImportPoint, axis: ImportPoint): number => v.x * axis.x + v.y * axis.y + v.z * axis.z;
+/** A host-frame vector along the part's own axes. */
+const inSeat = (seat: PartSeat, v: ImportPoint): ImportPoint => ({ x: along(v, seat.axes.x), y: along(v, seat.axes.y), z: along(v, seat.axes.z) });
+/** A direction's part to a millionth, never -0: a unit vector read through a turned frame comes out the same every time. */
+const unitPart = (n: number): number => Math.round(n * 1e6) / 1e6 + 0;
+
+/** A host-frame direction along the part's own axes, as a unit vector; null when it isn't a direction (no length, not a number). */
+function seatDirection(seat: PartSeat, v: ImportPoint | null | undefined): [number, number, number] | null {
+  if (!v) return null;
+  const d = inSeat(seat, v);
+  const length = Math.hypot(d.x, d.y, d.z);
+  if (!(length > 1e-9) || !Number.isFinite(length)) return null;
+  return [unitPart(d.x / length), unitPart(d.y / length), unitPart(d.z / length)];
+}
+
+/**
+ * Out of the nearest side of the part's box, for a connection point the file gives no facing: the side it is on, or
+ * nearest to (the underside, then the top, then the sides, when it is as near to two).
+ */
+function nearestSide(box: PartSeat["box"], at: ImportPoint): [number, number, number] {
+  const sides: readonly (readonly [number, [number, number, number]])[] = [
+    [box.min.z - at.z, [0, 0, -1]],
+    [at.z - box.max.z, [0, 0, 1]],
+    [box.min.y - at.y, [0, -1, 0]],
+    [at.y - box.max.y, [0, 1, 0]],
+    [box.min.x - at.x, [-1, 0, 0]],
+    [at.x - box.max.x, [1, 0, 0]],
+  ];
+  // How far outside each side it is (negative: inside, by how far): the greatest is the side it is beyond, or nearest.
+  let best = sides[0] ?? [0, [0, 0, -1]];
+  for (const side of sides) if (side[0] > best[0] + 1e-6) best = side;
+  return best[1];
+}
+
+/**
+ * The registered system kind among `rows` that a port's name names, when just one fits best: the most of the name's
+ * words in its label, then the fewest other words there ("Return" picks the return of a supply and return pair).
+ */
+function rowNamed(rows: readonly ServiceRow[], name: string): ServiceRow | null {
+  const words = new Set(name.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+  const scored = rows
+    .map((row) => {
+      const label = row.label.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+      const said = label.filter((w) => words.has(w)).length;
+      return { row, said, score: said * 100 - (label.length - said) };
+    })
+    .sort((a, b) => b.score - a.score);
+  const [first, second] = scored;
+  return first && first.said > 0 && first.score !== second?.score ? first.row : null;
+}
+
+interface PortKind {
+  readonly domain: string;
+  readonly systemKind: string;
+  /** Set when the file's word fits several kinds and nothing picked one: the kinds it could be, the one taken first. */
+  readonly among?: readonly ServiceRow[];
+}
+
+/**
+ * What a port connects to and what it carries. The file's own words first (its connector and system type); a port
+ * that says neither takes them from the system the file puts its product in. A reason when nothing says, or when no
+ * add-on here draws that kind of connection.
+ */
+function portKind(ctx: ImportRuleContext, p: ImportProduct, port: ImportPort): PortKind | string {
+  const registry = activeServiceRegistry();
+  const stated = port.domain ?? null;
+  const fits = (row: ServiceRow): boolean => row.asSystem && row.connector !== "none" && (stated === null || row.connector === stated);
+  // The system type the file gives the port; failing that, the systems the file puts the product in.
+  let rows = port.systemType ? registry.rows.filter((row) => fits(row) && row.ifc.system === "IfcDistributionSystem" && row.ifc.predefinedType === port.systemType) : [];
+  const exact = rows.length > 0;
+  if (!exact) {
+    const found = new Set<ServiceRow>();
+    for (const id of p.groupIds) {
+      const group = ctx.group(id);
+      const row = group ? systemRowOf(group, stated) : null;
+      if (row && fits(row)) found.add(row);
+    }
+    rows = [...found];
+  }
+  const connectors = [...new Set(rows.map((row) => row.connector))];
+  const domain = stated ?? (connectors.length === 1 ? (connectors[0] ?? null) : null);
+  if (domain === null) return NO_KIND;
+  if (!([...BUILTIN_CONNECTOR_IDS, ...registry.connectorIds] as readonly string[]).includes(domain)) return `no add-on here draws that kind of connection ("${domain}")`;
+  const [only, ...more] = rows;
+  const picked = only && more.length === 0 ? only : rowNamed(rows, port.name ?? "");
+  if (picked) return { domain, systemKind: picked.id };
+  // The file's own word fits several kinds: the first is taken, and the report says so. Kinds guessed from a system fit none surely enough to take.
+  return exact && only ? { domain, systemKind: only.id, among: rows } : { domain, systemKind: UNKNOWN_SYSTEM_KIND };
+}
+
+interface PortsRead {
+  readonly connectors: PartConnector[];
+  /** Why ports weren't brought in, each with how many. */
+  readonly left: ReadonlyMap<string, number>;
+  /** How many face out of the nearest side of the box, the file not saying which way they face. */
+  readonly facedBySide: number;
+  /** Notes about what a connector carries, where the file's word fits several kinds. */
+  readonly unsure: readonly string[];
+}
+
+/**
+ * A product's ports as its part type's connectors: each at its point and facing its way along the part's own axes,
+ * with what it connects to and carries, its opening's size and which way its system flows, where the file says.
+ * A port with no position, or that nothing says the kind of, isn't brought in; the reason is counted.
+ */
+function partConnectors(ctx: ImportRuleContext, p: ImportProduct, seat: PartSeat): PortsRead {
+  const left = new Map<string, number>();
+  const leave = (reason: string) => left.set(reason, (left.get(reason) ?? 0) + 1);
+  const read: Array<{ port: ImportPort; kind: PortKind; at: ImportPoint }> = [];
+  for (const port of p.ports) {
+    const { position } = port;
+    if (!position || ![position.x, position.y, position.z].every(Number.isFinite)) {
+      leave(NO_POSITION);
+      continue;
+    }
+    const kind = portKind(ctx, p, port);
+    if (typeof kind === "string") {
+      leave(kind);
+      continue;
+    }
+    const local = inSeat(seat, { x: position.x - seat.origin.x, y: position.y - seat.origin.y, z: position.z - seat.origin.z });
+    read.push({ port, kind, at: { x: steady(local.x), y: steady(local.y), z: steady(local.z) } });
+  }
+  // A port's name is its connector's id where it is a name of its own; one with none, or with another's, is numbered in order of place, so the file's order doesn't matter.
+  const slug = (port: ImportPort): string => (port.name ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40);
+  const names = new Map<string, number>();
+  for (const { port } of read) names.set(slug(port), (names.get(slug(port)) ?? 0) + 1);
+  const byPlace = [...read].sort((a, b) => a.at.x - b.at.x || a.at.y - b.at.y || a.at.z - b.at.z || (a.port.id < b.port.id ? -1 : 1));
+  const used = new Set([...names].filter(([name, count]) => name !== "" && count === 1).map(([name]) => name));
+  const ids = new Map<ImportPort, string>();
+  byPlace.forEach(({ port }, i) => {
+    let id = slug(port);
+    if (id === "" || names.get(id) !== 1) {
+      id = `port_${i + 1}`;
+      while (used.has(id)) id = `${id}_`.slice(-40);
+      used.add(id);
+    }
+    ids.set(port, id);
+  });
+
+  const connectors: PartConnector[] = [];
+  const unsure = new Map<string, { kinds: string[]; labels: string[] }>();
+  let facedBySide = 0;
+  for (const { port, kind, at } of read) {
+    if (connectors.length >= CONNECTORS_MAX) {
+      leave(`a part here takes ${CONNECTORS_MAX} at most`);
+      continue;
+    }
+    const stated = seatDirection(seat, port.direction);
+    const direction = stated ?? nearestSide(seat.box, at);
+    const size = port.size;
+    const across = size?.shape === "rect" ? seatDirection(seat, port.across) : null;
+    const flowDirection = FLOW_DIRECTIONS[port.flow ?? ""];
+    const made = connectorSchema.safeParse({
+      id: ids.get(port),
+      label: port.name?.trim().slice(0, 80) || `Connection ${byPlace.findIndex((r) => r.port === port) + 1}`,
+      domain: kind.domain,
+      systemKind: kind.systemKind,
+      position: [at.x, at.y, at.z],
+      direction,
+      shape: size?.shape ?? "none",
+      ...(size?.shape === "rect" ? { width: round(size.width), height: round(size.height) } : size?.shape === "round" ? { diameter: round(size.diameter) } : {}),
+      ...(flowDirection ? { flowDirection } : {}),
+      // The width's direction completes a rectangular opening's frame; one not square to the way it faces says nothing.
+      ...(across && Math.abs(across[0] * direction[0] + across[1] * direction[1] + across[2] * direction[2]) < 0.01 ? { widthAxis: across } : {}),
+    });
+    if (!made.success) {
+      leave("it couldn't be read");
+      continue;
+    }
+    connectors.push(made.data);
+    if (!stated) facedBySide += 1;
+    if (kind.among) {
+      const kinds = kind.among.map((row) => row.label.toLowerCase());
+      const key = kinds.join("|");
+      unsure.set(key, { kinds, labels: [...(unsure.get(key)?.labels ?? []), made.data.label] });
+    }
+  }
+  const notes = [...unsure.values()].map(({ kinds, labels }) => {
+    const one = labels.length === 1;
+    const named = labels.slice(0, UNSURE_NAMES_SHOWN).map((label) => `"${label}"`);
+    if (labels.length > UNSURE_NAMES_SHOWN) named.push(`${labels.length - UNSURE_NAMES_SHOWN} more`);
+    const which = named.length === 1 ? named.join("") : `${named.slice(0, -1).join(", ")} and ${named[named.length - 1]}`;
+    return `the file doesn't say whether ${which} ${one ? "carries" : "carry"} ${kinds.slice(0, -1).join(", ")} or ${kinds[kinds.length - 1]}, so ${one ? "it was" : "they were"} brought in as ${kinds[0]}; change ${one ? "it" : "them"} on the type if that is wrong`;
+  });
+  return { connectors, left, facedBySide, unsure: notes };
+}
+
+/** Connector names a note about what they carry spells out before "and N more". */
+const UNSURE_NAMES_SHOWN = 5;
+
+/** What the report says of a part type's ports: the ones not brought in, with the reason, and the ones whose facing or kind had to be taken. Nothing when all came in as the file has them. */
+function portNotes(ports: number, read: PortsRead): string[] {
+  const out: string[] = [];
+  const missing = [...read.left.values()].reduce((sum, n) => sum + n, 0);
+  if (missing > 0) {
+    const one = missing === 1;
+    const which = missing < ports ? `${missing} of its ${ports} connection points ${one ? "wasn't" : "weren't"}` : one ? "its connection point wasn't" : `its ${ports} connection points weren't`;
+    const why = read.left.size === 1 ? [...read.left.keys()].join("") : [...read.left].map(([reason, n]) => `${n}: ${reason}`).join("; ");
+    out.push(`${which} brought in (${why}); add ${one ? "it" : "them"} to the type by hand`);
+  }
+  const { length: brought } = read.connectors;
+  if (read.facedBySide > 0) {
+    const one = read.facedBySide === 1;
+    const which = read.facedBySide < brought ? `${read.facedBySide} of its connection points ${one ? "faces" : "face"}` : one ? "its connection point faces" : "its connection points face";
+    out.push(`the file doesn't say which way ${which}, so ${one ? "it was" : "they were"} brought in facing out of the nearest side of its box; check ${one ? "it" : "them"} before you route from ${one ? "it" : "them"}`);
+  }
+  out.push(...read.unsure);
+  return out;
 }
 
 /** A short, stable id part from a text (FNV-1a, base 36): the same box gives the same id on every import. */
@@ -386,9 +626,9 @@ function shortHash(text: string): string {
 
 /**
  * A placed part at the product's own insertion point and turn, as the box of
- * its shape, of a part type made once per type in the file. Its connectors
- * aren't read from the file this round: the report says so, and the part
- * joins nothing until someone joins it.
+ * its shape, of a part type made once per type in the file. The file's ports
+ * on it are the type's connectors, so it can be joined by hand; it comes in
+ * joined to nothing, and the report says which ports weren't brought in.
  */
 const part: ImportRuleDef = {
   id: "kernel.part",
@@ -407,8 +647,10 @@ const part: ImportRuleDef = {
     if (size.x < 1 || size.y < 1 || size.z < 1) return fail("it has no size");
     const centre = { x: steady((seat.box.min.x + seat.box.max.x) / 2), y: steady((seat.box.min.y + seat.box.max.y) / 2), z: steady((seat.box.min.z + seat.box.max.z) / 2) };
     const typeName = typeNameOf(p, nameOf(p));
-    // A part type's box hangs off its own point, so products share one only while their boxes sit the same way from theirs.
-    const boxKey = `${size.x}x${size.y}x${size.z}@${centre.x},${centre.y},${centre.z}`;
+    const ports = partConnectors(ctx, p, seat);
+    const { connectors } = ports;
+    // A part type's box and connectors hang off its own point, so products share one only while theirs sit the same way from theirs.
+    const boxKey = `${size.x}x${size.y}x${size.z}@${centre.x},${centre.y},${centre.z}${connectors.length > 0 ? `#${connectorsKey(connectors)}` : ""}`;
     const typeOf = (source: string, suffix: string) => (): PartTypeElement => {
       const definition: PartTypeDefinition = {
         familyName: typeName,
@@ -417,7 +659,7 @@ const part: ImportRuleDef = {
         typeParams: [],
         typeValues: {},
         instanceParams: [],
-        connectors: [],
+        connectors,
         geometry: [{ kind: "box", center: [centre.x, centre.y, centre.z], size: [size.x, size.y, size.z] }],
         symbol: [{ kind: "rect", center: [centre.x, centre.y], size: [size.x, size.y] }],
         tagFields: ["mark"],
@@ -427,13 +669,13 @@ const part: ImportRuleDef = {
     };
     let type: PartTypeElement | string;
     if (p.typeId) {
-      // The first box met of a file type keeps the type's plain id; a product of that type whose box sits differently gets a variant of its own.
+      // The first met of a file type keeps the type's plain id; a product of that type whose box or connectors sit differently gets a variant of its own.
       type = ctx.shared<PartTypeElement>(`part_type:${p.typeId}`, typeOf(p.typeId, "type"));
-      if (typeof type !== "string" && !hasBox(type, centre, size)) type = ctx.shared<PartTypeElement>(`part_type:${p.typeId}:${boxKey}`, typeOf(p.typeId, `type-${shortHash(boxKey)}`));
+      if (typeof type !== "string" && !hasShape(type, centre, size, connectors)) type = ctx.shared<PartTypeElement>(`part_type:${p.typeId}:${boxKey}`, typeOf(p.typeId, `type-${shortHash(boxKey)}`));
     } else type = ctx.shared<PartTypeElement>(`part_type:${category}:${typeName}:${boxKey}`, typeOf(p.sourceId, "type"));
     if (typeof type === "string") return fail(type);
     if (seat.why) ctx.note(`${typeName}: ${seat.why}`);
-    if (p.ports.length > 0) ctx.note(`${typeName}: its ${p.ports.length === 1 ? "connection point wasn't" : `${p.ports.length} connection points weren't`} brought in; join it by hand`);
+    for (const note of portNotes(p.ports.length, ports)) ctx.note(`${typeName}: ${note}`);
     const record: PartInstance = {
       ...base(ctx, p, level),
       kind: "part",
