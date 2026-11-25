@@ -32,9 +32,12 @@ import {
   partMesh,
   phaseStatusAt,
   placementOf,
+  portWidthAxis,
   rawRegistryWords,
   resolveConnectors,
   resolveGeometry,
+  riserWidthAxis,
+  segmentWidthAxis,
   siteMapConversion,
   siteOf,
   spaceAreaM2,
@@ -1003,7 +1006,11 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
   // leaves it, facing the branch, and the fitting a port at its own point that faces into the trunk; the two are
   // joined like any other pair. Found before the ports are written, so a trunk's branch ports follow its two ends.
   const branchesOn = new Map<string, Array<{ readonly fitting: RunFitting; readonly at: Vec3; readonly outward: Vec3 }>>();
-  const trunkOf = new Map<string, { readonly trunkId: string; readonly at: Vec3; readonly outward: Vec3 }>();
+  const trunkOf = new Map<string, { readonly trunkId: string; readonly at: Vec3; readonly outward: Vec3; readonly along: Vec3 }>();
+  // A port with flat sides that faces straight up or down: "level and to the left" says nothing there, so its local x is
+  // the width axis the kernel draws the run with (a riser takes it from the elbow that turns into it; a tap off the top
+  // or bottom of a trunk lies along the trunk). Round openings need none.
+  const needsWidthAxis = (size: RunSize | undefined, out: Vec3): boolean => (size?.shape === "rect" || size?.shape === "oval") && Math.abs(out.z) >= 0.999 * Math.hypot(out.x, out.y, out.z);
   for (const el of elements) {
     if (el.kind !== "run_fitting" || !el.host || el.ports.length === 0 || !products.has(el.id)) continue;
     const trunk = els[el.host.segmentId];
@@ -1014,7 +1021,7 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     const where = hostedPoints(trunk, el.host.s, el.host.side, el.host.dir, el.host.face, el.host.t);
     push(branchesOn, trunk.id, { fitting: el, at: where.onAxis, outward: where.outward });
     // In the fitting's own coordinates when it is on the trunk's level; otherwise at the fitting's point.
-    trunkOf.set(el.id, { trunkId: trunk.id, at: el.levelId === trunk.levelId ? where.onAxis : el.position, outward: where.outward });
+    trunkOf.set(el.id, { trunkId: trunk.id, at: el.levelId === trunk.levelId ? where.onAxis : el.position, outward: where.outward, along: { x: trunk.end.x - trunk.start.x, y: trunk.end.y - trunk.start.y, z: trunk.end.z - trunk.start.z } });
   }
   const connections: Array<readonly [string, string]> = [];
   for (const el of elements) {
@@ -1037,11 +1044,13 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     } else if (el.kind === "run_segment") {
       const sk = systemKindOf(el.systemId);
       // A segment's placement is its level's frame, so its ports are at the run's own coordinates. Each end faces away from the other.
-      const at = (p: Vec3, out: Vec3) => (host.placement ? geo.placement(host.placement, geo.facing(p, out)) : null);
+      const at = (p: Vec3, out: Vec3, across?: Vec3) => (host.placement ? geo.placement(host.placement, geo.facing(p, out, across)) : null);
+      const along = { x: el.end.x - el.start.x, y: el.end.y - el.start.y, z: el.end.z - el.start.z };
+      const across = needsWidthAxis(el.size, along) ? segmentWidthAxis(els, el) : undefined;
       // What a duct carries is a volume of air. A pipe's number may be fixture units, which is no flow rate, so it is left out.
       const facts: PortFacts = el.domain === "duct" ? { ...sizeFacts(el.size), flow: el.flow } : sizeFacts(el.size);
-      writePort(el.id, "start", "Start", undefined, el.domain, sk, at(el.start, { x: el.start.x - el.end.x, y: el.start.y - el.end.y, z: el.start.z - el.end.z }), facts);
-      writePort(el.id, "end", "End", undefined, el.domain, sk, at(el.end, { x: el.end.x - el.start.x, y: el.end.y - el.start.y, z: el.end.z - el.start.z }), facts);
+      writePort(el.id, "start", "Start", undefined, el.domain, sk, at(el.start, { x: -along.x, y: -along.y, z: -along.z }, across), facts);
+      writePort(el.id, "end", "End", undefined, el.domain, sk, at(el.end, along, across), facts);
       const ends: Array<readonly ["start" | "end", PortRef | undefined]> = [
         ["start", el.links.start],
         ["end", el.links.end],
@@ -1050,21 +1059,28 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
       const branches = [...(branchesOn.get(el.id) ?? [])].sort((a, b) => (a.fitting.host?.s ?? 0) - (b.fitting.host?.s ?? 0) || byId(a.fitting, b.fitting));
       for (const b of branches) {
         const size = b.fitting.ports[0]?.size;
-        writePort(el.id, `branch|${b.fitting.id}`, "Branch", undefined, el.domain, sk, at(b.at, b.outward), size ? sizeFacts(size) : {}, TRUNK_BRANCH_PORT);
+        writePort(el.id, `branch|${b.fitting.id}`, "Branch", undefined, el.domain, sk, at(b.at, b.outward, needsWidthAxis(size, b.outward) ? along : undefined), size ? sizeFacts(size) : {}, TRUNK_BRANCH_PORT);
       }
     } else if (el.kind === "run_fitting") {
       const sk = systemKindOf(el.systemId);
       // A fitting's placement is at its own point, unturned, so a port's place is its offset from that point.
       const local = (p: Vec3): Vec3 => ({ x: p.x - el.position.x, y: p.y - el.position.y, z: p.z - el.position.z });
+      const trunk = trunkOf.get(el.id);
+      // The width axis the fitting's body is drawn with at this port: the trunk's line for a branch fitting, else the riser it joins, else what its other side leaves it.
+      const widthAt = (port: RunFitting["ports"][number]): Vec3 | undefined => {
+        if (!needsWidthAxis(port.size, port.direction)) return undefined;
+        if (trunk) return trunk.along;
+        const joined = port.link ? els[port.link.elementId] : undefined;
+        return (joined?.kind === "run_segment" ? riserWidthAxis(els, joined, new Set([el.id])) : null) ?? portWidthAxis(els, { elementId: el.id, port: port.id }) ?? undefined;
+      };
       for (const port of [...el.ports].sort(byId)) {
-        writePort(el.id, port.id, port.id, undefined, el.domain, sk, host.placement ? geo.placement(host.placement, geo.facing(local(port.position), port.direction)) : null, sizeFacts(port.size));
+        writePort(el.id, port.id, port.id, undefined, el.domain, sk, host.placement ? geo.placement(host.placement, geo.facing(local(port.position), port.direction, widthAt(port))) : null, sizeFacts(port.size));
         if (port.link) connections.push([`${el.id}|${port.id}`, `${port.link.elementId}|${port.link.port}`]);
       }
-      const trunk = trunkOf.get(el.id);
       if (trunk) {
         const size = el.ports[0]?.size;
         const into = { x: -trunk.outward.x, y: -trunk.outward.y, z: -trunk.outward.z };
-        writePort(el.id, `trunk|${trunk.trunkId}`, "Trunk", undefined, el.domain, sk, host.placement ? geo.placement(host.placement, geo.facing(local(trunk.at), into)) : null, size ? sizeFacts(size) : {}, FITTING_TRUNK_PORT);
+        writePort(el.id, `trunk|${trunk.trunkId}`, "Trunk", undefined, el.domain, sk, host.placement ? geo.placement(host.placement, geo.facing(local(trunk.at), into, needsWidthAxis(size, into) ? trunk.along : undefined)) : null, size ? sizeFacts(size) : {}, FITTING_TRUNK_PORT);
         connections.push([`${trunk.trunkId}|branch|${el.id}`, `${el.id}|trunk|${trunk.trunkId}`]);
       }
     }
