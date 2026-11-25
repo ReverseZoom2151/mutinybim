@@ -16,9 +16,12 @@ import {
   asElementId,
   asRevision,
   gatedRecordFeatures,
+  RISER_DEFAULT_WIDTH_AXIS,
   hostedPoints,
+  portWidthAxis,
   resolveConnectors,
   segmentPort,
+  segmentWidthAxis,
   worldConnector,
   type BimElement,
   type ModelState,
@@ -533,5 +536,120 @@ describe("a branch fitting on a trunk that stays one piece", () => {
     expect(out.warnings.filter((w) => w.startsWith(`${fitting.id}:`))).toEqual([`${fitting.id}: the run it branches from is not in the file, so the file does not say where on that run it sits`]);
     expect(out.portsOf(fitting.id).map((p) => text(p, 2))).toEqual([fitting.ports[0]?.id]);
     expect(ofType(out.file, "IFCDISTRIBUTIONPORT").filter((p) => text(p, 4) === "Branch" && out.partnerOf(p).length === 0)).toEqual([]);
+  });
+});
+
+describe("a rectangular duct's port keeps the kernel's width axis where the port faces straight up or down", () => {
+  const WIDE: RunSize = { shape: "rect", width: 24 * IN, height: 8 * IN };
+  const AIR = { id: "sys-sa", kind: "supply_air", name: "Supply Air 1" };
+  const Z0 = 10 * FT;
+
+  /** A level leg along `heading`, then straight up: a wide flat duct turning into a riser. */
+  function intoRiser(heading: "north" | "east"): ModelState {
+    const m = new Log({ modelId: "ports", revision: asRevision(0), elements: {}, connections: [], settings: DEFAULT_SETTINGS });
+    m.ok({ type: "create_level", levelId: "lvl-1", name: "Level 1", elevationMm: 0 });
+    const corner = heading === "north" ? { x: 0, y: 10 * FT } : { x: 10 * FT, y: 0 };
+    m.ok({ type: "route_run", idPrefix: "R", levelId: "lvl-1", domain: "duct", size: WIDE, elevationMm: Z0, system: AIR, points: [{ x: 0, y: 0 }, corner, { ...corner, elevationMm: Z0 + 8 * FT }] });
+    return m.head;
+  }
+
+  const riserOf = (model: ModelState): RunSegment => {
+    const riser = ofKind(model, "run_segment").find((s) => Math.hypot(s.end.x - s.start.x, s.end.y - s.start.y) < 1e-6);
+    if (!riser) throw new Error("no riser");
+    return riser;
+  };
+
+  /** |cosine| between a port frame's local x and an axis: 1 when the port's width lies along it. */
+  const along = (frame: Frame, axis: { readonly x: number; readonly y: number; readonly z: number }) => Math.abs(dot(frame.x, [axis.x, axis.y, axis.z]));
+
+  it.each([
+    ["north", [1, 0, 0]],
+    ["east", [0, 1, 0]],
+  ] satisfies ["north" | "east", V3][])("turning from %s into a riser: the riser's ends and the elbow's port up have their width along the kernel's axis, as the elbow's body has", (heading, expected) => {
+    const model = intoRiser(heading);
+    const riser = riserOf(model);
+    const kernel = segmentWidthAxis(model.elements, riser);
+    expect([Math.abs(kernel.x), Math.abs(kernel.y), Math.abs(kernel.z)].map((c) => Math.round(c * 1e6) / 1e6)).toEqual(expected);
+    const x = exported(model);
+    for (const port of x.portsOf(riser.id)) {
+      const frame = frameOf(x.file, ref(port, 5));
+      expect(Math.abs(frame.z[2])).toBeCloseTo(1, 6);
+      expect(along(frame, kernel)).toBeCloseTo(1, 6);
+    }
+    const elbow = ofKind(model, "run_fitting").find((f) => f.fittingType === "elbow");
+    const up = elbow?.ports.find((p) => Math.abs(p.direction.z) > 0.999);
+    if (!elbow || !up) throw new Error("no elbow into the riser");
+    const atPort = portWidthAxis(model.elements, { elementId: elbow.id, port: up.id });
+    expect(atPort ? Math.abs(dot([atPort.x, atPort.y, atPort.z], [kernel.x, kernel.y, kernel.z])) : NaN).toBeCloseTo(1, 6);
+    const upPort = x.portsOf(elbow.id).find((p) => text(p, 2) === up.id);
+    if (!upPort) throw new Error("no port");
+    expect(along(frameOf(x.file, ref(upPort, 5)), kernel)).toBeCloseTo(1, 6);
+
+    // The elbow's exported body agrees: where it meets the riser it is 24 in across along that axis and 8 in the other way.
+    const body = get(x.file, refs(get(x.file, refs(get(x.file, ref(x.entityOf(elbow.id), 6)), 2)[0] ?? -1), 3)[0] ?? -1);
+    expect(body.type).toBe("IFCTRIANGULATEDFACESET");
+    const coords = get(x.file, ref(body, 0)).args[0];
+    const points = coords?.kind === "list" ? coords.items.map((p) => (p.kind === "list" ? p.items.map((c) => (c.kind === "number" ? c.value : NaN)) : [])) : [];
+    const top = Math.max(...points.map((p) => p[2] ?? -Infinity));
+    const face = points.filter((p) => Math.abs((p[2] ?? NaN) - top) < 0.5);
+    const extent = (i: number) => Math.max(...face.map((p) => p[i] ?? NaN)) - Math.min(...face.map((p) => p[i] ?? NaN));
+    expect(expected[0] === 1 ? extent(0) : extent(1)).toBeCloseTo(24 * IN, 0);
+    expect(expected[0] === 1 ? extent(1) : extent(0)).toBeCloseTo(8 * IN, 0);
+  });
+
+  it("a level or sloped end keeps its width level and square to the run, as the kernel has it", () => {
+    const model = intoRiser("north");
+    const level = ofKind(model, "run_segment").find((s) => s.id !== riserOf(model).id);
+    if (!level) throw new Error("no level leg");
+    const sloped: RunSegment = { ...level, id: asElementId("sloped-run"), start: { x: 5000, y: 0, z: 3000 }, end: { x: 8000, y: 4000, z: 3600 }, links: {}, branches: [] };
+    const full: ModelState = { ...model, elements: { ...model.elements, [sloped.id]: sloped } };
+    const x = exported(full);
+    for (const seg of [level, sloped]) {
+      const kernel = segmentWidthAxis(full.elements, seg);
+      for (const port of x.portsOf(seg.id)) {
+        const frame = frameOf(x.file, ref(port, 5));
+        expect(along(frame, kernel)).toBeCloseTo(1, 6);
+        expect(frame.x[2]).toBeCloseTo(0, 9);
+      }
+    }
+  });
+
+  it("a riser joined to nothing takes the kernel's default width axis, and a round riser needs none", () => {
+    const base = intoRiser("north");
+    const riser = riserOf(base);
+    const alone: RunSegment = { ...riser, id: asElementId("alone-riser"), start: { x: 9000, y: 9000, z: 0 }, end: { x: 9000, y: 9000, z: 2000 }, links: {}, branches: [] };
+    const round: RunSegment = { ...alone, id: asElementId("round-riser"), start: { x: 12000, y: 9000, z: 0 }, end: { x: 12000, y: 9000, z: 2000 }, size: { shape: "round", diameter: 250 } };
+    const model: ModelState = { ...base, elements: { ...base.elements, [alone.id]: alone, [round.id]: round } };
+    const x = exported(model);
+    expect(segmentWidthAxis(model.elements, alone)).toEqual(RISER_DEFAULT_WIDTH_AXIS);
+    for (const port of x.portsOf(alone.id)) expect(along(frameOf(x.file, ref(port, 5)), RISER_DEFAULT_WIDTH_AXIS)).toBeCloseTo(1, 6);
+    for (const port of x.portsOf(round.id)) {
+      const frame = frameOf(x.file, ref(port, 5));
+      expect(frame.hasAxis).toBe(true);
+      expect(Math.abs(dot(frame.x, frame.z))).toBeLessThan(1e-9);
+    }
+  });
+
+  it("a tap off the top of a trunk: the trunk's branch port and the tap's ports have their width along the trunk", () => {
+    const m = new Log({ modelId: "ports", revision: asRevision(0), elements: {}, connections: [], settings: DEFAULT_SETTINGS });
+    m.ok({ type: "create_level", levelId: "lvl-1", name: "Level 1", elevationMm: 0 });
+    m.ok({ type: "route_run", idPrefix: "T", levelId: "lvl-1", domain: "duct", size: { shape: "rect", width: 24 * IN, height: 12 * IN }, elevationMm: Z0, system: AIR, points: [{ x: 0, y: 0 }, { x: 20 * FT, y: 0 }] });
+    const small: RunSize = { shape: "rect", width: 12 * IN, height: 6 * IN };
+    m.ok({ type: "route_run", idPrefix: "D", levelId: "lvl-1", domain: "duct", size: small, elevationMm: Z0 + 4 * FT, system: AIR, points: [{ x: 8 * FT, y: 8 * FT }, { x: 8 * FT, y: 0, elevationMm: Z0 + 3 * FT }] });
+    m.ok({ type: "route_run", idPrefix: "B", levelId: "lvl-1", domain: "duct", size: small, elevationMm: Z0 + 6 * IN, system: AIR, points: [{ x: 8 * FT, y: 0 }], from: { kind: "run_end", elementId: "D-s2", port: "end" }, to: { kind: "run_branch", segmentId: "T-s1", face: "top" } });
+    const model = m.head;
+    const tap = ofKind(model, "run_fitting").find((f) => f.host?.segmentId === "T-s1");
+    const own = tap?.ports[0];
+    if (!tap || !own) throw new Error("no tap");
+    expect(Math.abs(own.direction.z)).toBeCloseTo(1, 6);
+    const x = exported(model);
+    const ports = [x.portsOf("T-s1").find((p) => text(p, 4) === "Branch"), ...x.portsOf(tap.id)];
+    expect(ports).toHaveLength(3);
+    for (const port of ports) {
+      if (!port) throw new Error("no port");
+      const frame = frameOf(x.file, ref(port, 5));
+      expect(Math.abs(frame.z[2])).toBeCloseTo(1, 6);
+      expect(along(frame, { x: 1, y: 0, z: 0 })).toBeCloseTo(1, 6);
+    }
   });
 });
