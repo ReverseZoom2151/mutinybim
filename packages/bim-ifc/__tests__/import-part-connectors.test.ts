@@ -44,7 +44,8 @@ function placedConnectors(els: readonly BimElement[], part: PartInstance) {
   if (type?.kind !== "part_type") throw new Error(`${part.id} has no part type`);
   return resolveConnectors(type.definition, part.values).map((c) => {
     const world = worldConnector(part, c);
-    return { ...c, flowDirection: type.definition.connectors.find((d) => d.id === c.id)?.flowDirection, at: world.position, facing: world.direction };
+    const stored = type.definition.connectors.find((d) => d.id === c.id);
+    return { ...c, flowDirection: stored?.flowDirection, widthAxis: stored?.widthAxis, at: world.position, facing: world.direction };
   });
 }
 
@@ -88,15 +89,25 @@ describe("importIfc brings a part's connection points back (#65)", () => {
         for (const axis of ["x", "y", "z"] as const) expect(Math.abs(got.at[axis] - was.at[axis])).toBeLessThanOrEqual(0.1);
         expect(got).toMatchObject({ domain: was.domain, systemKind: was.systemKind });
         expect(got.flowDirection).toBe(was.flowDirection);
-        // The way it faces is the file's where the file says; where it doesn't, out of one side of the part's box.
-        if (port.direction) for (const axis of ["x", "y", "z"] as const) expect(got.facing[axis]).toBeCloseTo(was.facing[axis], 5);
-        else expect([got.facing.x, got.facing.y, got.facing.z].map(Math.abs).sort()).toEqual([0, 0, 1]);
-        // Its opening is the file's where the file says; where it doesn't, it has none of its own and takes any run.
-        if (port.size) expect(got).toMatchObject({ shape: was.shape, ...(was.shape === "rect" ? { width: expect.closeTo(was.width ?? 0, 1), height: expect.closeTo(was.height ?? 0, 1) } : { diameter: expect.closeTo(was.diameter ?? 0, 1) }) });
-        else expect(got.shape).toBe("none");
+        // It faces the way it did: the file says so for every port of ours.
+        expect(port.direction).not.toBeNull();
+        for (const axis of ["x", "y", "z"] as const) expect(got.facing[axis]).toBeCloseTo(was.facing[axis], 6);
+        // Its opening is the shape and size it was.
+        expect(got.shape).toBe(was.shape);
+        for (const side of ["width", "height", "diameter"] as const) {
+          if (was[side] === undefined) expect(got[side]).toBeUndefined();
+          else expect(got[side]).toBeCloseTo(was[side] ?? 0, 5);
+        }
+        // What it is rated at: a duct's or pipe's design flow, an electrical connector's voltage. A flow of nothing isn't written.
+        if (was.domain !== "electrical" && was.flow) expect(got.flow).toBeCloseTo(was.flow, 4);
+        else expect(got.flow).toBeUndefined();
+        if (was.voltage === undefined) expect(got.voltage).toBeUndefined();
+        else expect(got.voltage).toBeCloseTo(was.voltage, 5);
       }
     }
     expect(leftOut(plan.report.notes)).toEqual([]);
+    // Nothing is left to check by hand: every port says which way it faces.
+    expect(plan.report.notes.filter((n) => n.includes("which way"))).toEqual([]);
     expect(landImport(EMPTY, plan.records).dropped).toEqual([]);
   });
 
@@ -104,16 +115,17 @@ describe("importIfc brings a part's connection points back (#65)", () => {
     const { plan, pairs } = roundTrip(await build(rooftopUnit));
     const type = plan.records.find((r) => r.id === pairs[0]?.got.typeId);
     expect(type?.kind === "part_type" ? type.definition.connectors : null).toMatchObject([
-      { id: "supply", label: "Supply", domain: "duct", systemKind: "supply_air", position: [-762, 0, 0], direction: [0, 0, -1] },
-      { id: "return", label: "Return", domain: "duct", systemKind: "return_air", position: [762, 0, 0], direction: [0, 0, -1] },
+      { id: "supply", label: "Supply", domain: "duct", systemKind: "supply_air", position: [-762, 0, 0], direction: [0, 0, -1], shape: "rect", width: 1168.4, height: 305, widthAxis: [0, 1, 0] },
+      { id: "return", label: "Return", domain: "duct", systemKind: "return_air", position: [762, 0, 0], direction: [0, 0, -1], shape: "rect", width: 1168.4, height: 305, widthAxis: [0, 1, 0] },
     ]);
+    expect(plan.report.notes).toEqual([]);
   });
 
   it("electrical-room: panel LP-1 has its feeder connector, and the receptacles share one type with theirs", async () => {
     const { plan, pairs } = roundTrip(await build(electricalRoom));
     const panel = pairs.find((p) => p.was.mark === "LP-1");
     const panelType = plan.records.find((r) => r.id === panel?.got.typeId);
-    expect(panelType?.kind === "part_type" ? panelType.definition.connectors : null).toMatchObject([{ id: "feeder", label: "Feeder", domain: "electrical", systemKind: "power", position: [0, 0, 762] }]);
+    expect(panelType?.kind === "part_type" ? panelType.definition.connectors : null).toEqual([{ id: "feeder", label: "Feeder", domain: "electrical", systemKind: "power", position: [0, 0, 762], direction: [0, 0, 1], shape: "none", voltage: 208 }]);
     const receptacles = pairs.filter((p) => p.was.mark !== "LP-1");
     // Turned onto all four walls, each with its connector at the same point of the part: one part type still.
     expect(new Set(receptacles.map((p) => p.got.rotationDeg))).toEqual(new Set([0, 90, 180, 270]));
@@ -143,7 +155,7 @@ describe("an imported part can be connected by hand (#65)", () => {
     expect(joined?.kind === "part" ? joined.links?.supply?.elementId : null).toEqual(expect.stringContaining("by-hand"));
   });
 
-  it("electrical-room: a circuit finds an imported receptacle's connector, and still needs the voltage its type had (type values aren't brought in yet)", async () => {
+  it("electrical-room: an imported receptacle goes on a circuit; an imported panel can't feed one yet (its type's values aren't brought in)", async () => {
     const model = await build(electricalRoom);
     const { text } = exportIfc({ model, project: PROJECT, timeStamp: TIME_STAMP });
     // Read back into the model it came from, beside the parts it was made from.
@@ -155,10 +167,13 @@ describe("an imported part can be connected by hand (#65)", () => {
     const panel = came.find((p) => p.mark === "LP-1");
     const receptacle = came.find((p) => p.mark !== "LP-1");
     if (!ownPanel || !panel || !receptacle) throw new Error("the panel or a receptacle is missing");
-    // Fed from the model's own panel: the receptacle's one connector is found (it used to have none to serve). Its
-    // voltage was a parameter of its type, and a type's values aren't brought in yet, so the circuit stops there.
-    expect(m.refused({ type: "create_service_link", linkId: "by-hand", sourceId: ownPanel.id, members: [{ elementId: receptacle.id }] })).toBe("20A 125V NEMA 5-20R has no voltage on its power connector; set it before circuiting it");
-    // Feeding from the imported panel needs its voltage and phases: its type's values again.
+    // Fed from the model's own panel: the receptacle's one connector is found, with the 120 V the file's port set gives it.
+    const type = plan.records.find((r) => r.id === receptacle.typeId);
+    expect(type?.kind === "part_type" ? type.definition.connectors : null).toMatchObject([{ id: "power", domain: "electrical", voltage: 120 }]);
+    m.ok({ type: "create_service_link", linkId: "by-hand", sourceId: ownPanel.id, members: [{ elementId: receptacle.id }] });
+    const link = m.head.elements["by-hand"];
+    expect(link?.kind === "service_link" ? link.members.map((x) => ({ elementId: x.elementId, connector: x.connector })) : null).toEqual([{ elementId: receptacle.id, connector: "power" }]);
+    // Feeding from the imported panel needs its voltage and phases as values of its type, which aren't brought in yet.
     expect(m.refused({ type: "create_service_link", linkId: "from-imported", sourceId: panel.id, members: [{ elementId: receptacle.id }] })).toContain("can't feed anything");
   });
 });
@@ -290,6 +305,37 @@ describe("importIfc reads ports from any file (#65)", () => {
     ]);
     expect(connectors("SD-1")[2]).not.toHaveProperty("flowDirection");
     expect(leftOut(plan.report.notes)).toEqual([]);
+  });
+
+  it("one property set shared by many ports, with bounded values: each port gets its size, flow and voltage in the connector's units", () => {
+    const { connectors, plan } = foreign((t) => {
+      const one = terminal(t, "SD-1", [1000, 1000, 2700], box(t));
+      const two = terminal(t, "SD-2", [5000, 4000, 2700], box(t));
+      const ducts = [one, two].map((host) => nest(t, host, [{ name: "Supply air", at: [0, 0, 300], facing: [0, 0, 1], kind: DUCT_SUPPLY }])[0] ?? 0);
+      const [drain, power] = nest(t, two, [
+        { name: "Drain", at: [0, -200, 0], facing: [0, 0, -1], kind: ".SOURCE.,.PIPE.,.DRAINAGE." },
+        { name: "Power", at: [300, 0, 150], facing: [1, 0, 0], kind: ".SINK.,.CABLE.,.ELECTRICAL." },
+      ]);
+      const bounded = (name: string, measure: string, unit: number | null) => `#${t.add("IFCPROPERTYBOUNDEDVALUE", `'${name}',$,$,$,${unit ? `#${unit}` : "$"},${measure}`)}`;
+      const share = (name: string, props: readonly string[], to: readonly number[]) => {
+        const set = t.add("IFCPROPERTYSET", `${t.guid()},$,'${name}',$,(${props.join(",")})`);
+        t.add("IFCRELDEFINESBYPROPERTIES", `${t.guid()},$,$,$,(${to.map((p) => `#${p}`).join(",")}),#${set}`);
+      };
+      // The file names no flow unit: a flow with none is cubic metres a second. 0.2 m3/s is 423.776 cfm.
+      share("Pset_DistributionPortTypeDuct", [`#${t.add("IFCPROPERTYSINGLEVALUE", `'NominalWidth',$,IFCNONNEGATIVELENGTHMEASURE(250.),$`)}`, bounded("VolumetricFlowRate", "IFCVOLUMETRICFLOWRATEMEASURE(0.2)", null)], ducts);
+      // A flow in litres a minute, the unit named on the property: 37.854118 L/min is 10 US gallons a minute.
+      const litre = t.add("IFCCONVERSIONBASEDUNIT", `#${t.add("IFCDIMENSIONALEXPONENTS", "3,0,0,0,0,0,0")},.VOLUMEUNIT.,'LITRE',#${t.add("IFCMEASUREWITHUNIT", `IFCVOLUMEMEASURE(0.001),#${t.add("IFCSIUNIT", "*,.VOLUMEUNIT.,$,.CUBIC_METRE.")}`)}`);
+      const minute = t.add("IFCCONVERSIONBASEDUNIT", `#${t.add("IFCDIMENSIONALEXPONENTS", "0,0,1,0,0,0,0")},.TIMEUNIT.,'MINUTE',#${t.add("IFCMEASUREWITHUNIT", `IFCTIMEMEASURE(60.),#${t.add("IFCSIUNIT", "*,.TIMEUNIT.,$,.SECOND.")}`)}`);
+      const perMinute = t.add("IFCDERIVEDUNIT", `(#${t.add("IFCDERIVEDUNITELEMENT", `#${litre},1`)},#${t.add("IFCDERIVEDUNITELEMENT", `#${minute},-1`)}),.VOLUMETRICFLOWRATEUNIT.,$,$`);
+      share("Pset_DistributionPortTypePipe", [`#${t.add("IFCPROPERTYSINGLEVALUE", `'NominalDiameter',$,IFCPOSITIVELENGTHMEASURE(31.75),$`)}`, bounded("VolumetricFlowRate", "IFCVOLUMETRICFLOWRATEMEASURE(37.854118)", perMinute)], [drain ?? 0]);
+      // A voltage in kilovolts, the unit named on the property.
+      share("Pset_DistributionPortTypeCable", [bounded("Voltage", "IFCELECTRICVOLTAGEMEASURE(0.48)", t.add("IFCSIUNIT", "*,.ELECTRICVOLTAGEUNIT.,.KILO.,.VOLT."))], [power ?? 0]);
+    });
+    const duct = { id: "supply_air", shape: "round", diameter: 250, flow: expect.closeTo(423.776, 2) };
+    expect(connectors("SD-1")).toMatchObject([duct]);
+    expect(connectors("SD-2")).toMatchObject([duct, { id: "drain", shape: "round", diameter: 31.75, flow: expect.closeTo(10, 4) }, { id: "power", domain: "electrical", systemKind: "power", shape: "none", voltage: 480 }]);
+    expect(connectors("SD-2")[2]).not.toHaveProperty("flow");
+    expect(plan.report.notes).toEqual([]);
   });
 
   it("a port placed from the storey, not from its host, lands at the same point of the part", () => {

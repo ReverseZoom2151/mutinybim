@@ -1,4 +1,5 @@
 import { OUTLINE_WITH_HOLES, type ImportGroup, type ImportPort, type ImportPortSize, type ImportProduct, type ImportSource, type ImportStorey, type ParamValue } from "@permitzip/bim-kernel";
+import { fromSI, type UnitCode } from "@permitzip/bim-units";
 import { readStep, type ReadEntity, type StepFile, type StepToken } from "../read";
 import { ifcEntityName, isInstantiableEntity, ownAttributes } from "../schema-ifc4x3";
 import { GeometryReader, apply, boundsIn, boundsOf, compose, hostFrame, type Frame } from "./geometry";
@@ -120,8 +121,49 @@ function siScale(u: ReadEntity): number {
  */
 const PORT_CONNECTS: Readonly<Record<string, string>> = { DUCT: "duct", PIPE: "pipe", CABLE: "electrical", CABLECARRIER: "conduit" };
 
-/** The standard port property sets a size is read from (`Pset_DistributionPortTypeDuct`, `…TypePipe` and their kin). */
+/** The standard port property sets a port's size, flow and voltage are read from (`Pset_DistributionPortTypeDuct`, `…TypePipe`, `…TypeCable` and their kin). */
 const PORT_SETS = "Pset_DistributionPort";
+
+/** The standard sets' lengths that say a port's opening. */
+const PORT_LENGTHS: ReadonlySet<string> = new Set(["NominalWidth", "NominalHeight", "NominalDiameter", "OuterDiameter"]);
+
+/** The unit a connector counts its design flow in, by what it connects to: what the exporter writes `VolumetricFlowRate` from. */
+const PORT_FLOW_UNIT: Readonly<Record<string, UnitCode>> = { duct: "cfm", pipe: "gpm" };
+
+const SI_PREFIX: Readonly<Record<string, number>> = {
+  EXA: 1e18, PETA: 1e15, TERA: 1e12, GIGA: 1e9, MEGA: 1e6, KILO: 1e3, HECTO: 1e2, DECA: 10,
+  DECI: 1e-1, CENTI: 1e-2, MILLI: 1e-3, MICRO: 1e-6, NANO: 1e-9, PICO: 1e-12, FEMTO: 1e-15, ATTO: 1e-18,
+};
+
+/**
+ * How many SI units one of a file unit is: an SI unit with its prefix, a unit converted from another (a foot, a
+ * US gallon, a minute), or one derived from others (cubic feet per minute). Null: not a unit this reads.
+ */
+function siFactor(file: StepFile, u: ReadEntity | undefined, depth = 0): number | null {
+  if (!u || depth > 4) return null;
+  if (u.type === "IFCSIUNIT") {
+    const prefix = enumOf(u.args[2]);
+    return prefix ? (SI_PREFIX[prefix] ?? null) : 1;
+  }
+  if (u.type === "IFCCONVERSIONBASEDUNIT" || u.type === "IFCCONVERSIONBASEDUNITWITHOFFSET") {
+    const measure = file.entities.get(refs(u.args[3])[0] ?? -1);
+    const factor = measure ? value(measure.args[0]) : null;
+    const base = measure ? siFactor(file, file.entities.get(refs(measure.args[1])[0] ?? -1), depth + 1) : null;
+    return typeof factor === "number" && factor > 0 && base !== null ? factor * base : null;
+  }
+  if (u.type === "IFCDERIVEDUNIT") {
+    let out = 1;
+    for (const id of refs(u.args[0])) {
+      const element = file.entities.get(id);
+      const base = siFactor(file, file.entities.get(refs(element?.args[0])[0] ?? -1), depth + 1);
+      const exponent = value(element?.args[1]);
+      if (base === null || typeof exponent !== "number") return null;
+      out *= base ** exponent;
+    }
+    return out;
+  }
+  return null;
+}
 
 /** A predefined type that says nothing: left out, or NOTDEFINED. */
 const unset = (predefined: string | null): boolean => predefined === null || predefined === "NOTDEFINED";
@@ -275,27 +317,75 @@ export function readIfcSource(text: string, opts: IfcReadOptions): ImportSource 
     return out;
   };
 
-  /** A port's opening from the standard port property sets: lengths in the file's unit, or in the property's own. */
-  const portSize = (pid: number): ImportPortSize | null => {
-    const lengths: Record<string, number> = {};
+  /** SI units per one of the project's unit of a kind (the file's unit assignment). Absent from it: the SI unit itself, as IFC reads a value with no unit. */
+  const projectUnits = new Map<string, number>();
+  const projectUnit = (type: string): number => {
+    let factor = projectUnits.get(type);
+    if (factor === undefined) {
+      const project = all("IFCPROJECT")[0];
+      const assignment = project ? file.entities.get(refs(project.args[8])[0] ?? -1) : undefined;
+      const unit = refs(assignment?.args[0]).map((id) => file.entities.get(id)).find((u) => enumOf(u?.args[1]) === type);
+      factor = siFactor(file, unit) ?? 1;
+      projectUnits.set(type, factor);
+    }
+    return factor;
+  };
+  /**
+   * What the standard port property sets say of a port: each number once, with the unit the property names (else
+   * the project's). A plain value, or a bounded value's set point (else its two bounds when they agree). Many ports
+   * may share one set.
+   */
+  const portNumbers = (pid: number): ReadonlyMap<string, { readonly value: number; readonly unit: ReadEntity | undefined }> => {
+    const out = new Map<string, { value: number; unit: ReadEntity | undefined }>();
     for (const p of psetsOf.get(pid) ?? []) {
       const set = file.entities.get(p);
       if (set?.type !== "IFCPROPERTYSET" || !(str(set.args[2]) ?? "").startsWith(PORT_SETS)) continue;
       for (const propId of refs(set.args[4])) {
         const prop = file.entities.get(propId);
-        if (prop?.type !== "IFCPROPERTYSINGLEVALUE") continue;
-        const key = str(prop.args[0]);
-        const v = value(prop.args[2]);
-        if (!key || typeof v !== "number" || !(v > 0)) continue;
-        lengths[key] ??= v * (lengthUnitScale(file, file.entities.get(refs(prop.args[3])[0] ?? -1)) ?? scale);
+        const key = prop ? str(prop.args[0]) : null;
+        if (!prop || !key || out.has(key)) continue;
+        let v: ParamValue | null = null;
+        let unit: StepToken | undefined;
+        if (prop.type === "IFCPROPERTYSINGLEVALUE") {
+          v = value(prop.args[2]);
+          unit = prop.args[3];
+        } else if (prop.type === "IFCPROPERTYBOUNDEDVALUE") {
+          const upper = value(prop.args[2]);
+          v = value(prop.args[5]) ?? (upper !== null && upper === value(prop.args[3]) ? upper : null);
+          unit = prop.args[4];
+        }
+        if (typeof v === "number" && v > 0) out.set(key, { value: v, unit: file.entities.get(refs(unit)[0] ?? -1) });
       }
     }
-    const { NominalWidth: width, NominalHeight: height } = lengths;
-    const diameter = lengths.NominalDiameter ?? lengths.OuterDiameter;
-    if (diameter !== undefined) return { shape: "round", diameter };
-    if (width !== undefined && height !== undefined) return { shape: "rect", width, height };
+    return out;
+  };
+  /** A port's opening, and the numbers it is rated at, from the standard port property sets. */
+  const portFacts = (pid: number, domain: string | null): Pick<ImportPort, "size" | "rated"> => {
+    const numbers = portNumbers(pid);
+    const length = (key: string): number | undefined => {
+      const n = PORT_LENGTHS.has(key) ? numbers.get(key) : undefined;
+      return n ? n.value * (lengthUnitScale(file, n.unit) ?? scale) : undefined;
+    };
+    const inSI = (key: string, type: string): number | undefined => {
+      const n = numbers.get(key);
+      return n ? n.value * (siFactor(file, n.unit) ?? projectUnit(type)) : undefined;
+    };
+    const width = length("NominalWidth");
+    const height = length("NominalHeight");
+    const diameter = length("NominalDiameter") ?? length("OuterDiameter");
+    let size: ImportPortSize | null = null;
+    if (diameter !== undefined) size = { shape: "round", diameter };
+    else if (width !== undefined && height !== undefined) size = { shape: "rect", width, height };
     // A width alone is a round opening's diameter, as the standard set words it.
-    return width !== undefined ? { shape: "round", diameter: width } : null;
+    else if (width !== undefined) size = { shape: "round", diameter: width };
+    // A connector counts its flow in its own unit (air or liquid); a millionth of it is noise from the conversion.
+    const rated: Record<string, number> = {};
+    const flowUnit = PORT_FLOW_UNIT[domain ?? ""];
+    const flow = flowUnit ? inSI("VolumetricFlowRate", "VOLUMETRICFLOWRATEUNIT") : undefined;
+    if (flowUnit && flow !== undefined) rated.flow = Math.round(fromSI(flow, flowUnit) * 1e6) / 1e6;
+    const volts = inSI("Voltage", "ELECTRICVOLTAGEUNIT");
+    if (volts !== undefined) rated.voltage = Math.round(volts * 1e6) / 1e6;
+    return { size, ...(Object.keys(rated).length > 0 ? { rated } : {}) };
   };
   const readPort = (pid: number): ImportPort[] => {
     const port = file.entities.get(pid);
@@ -308,6 +398,7 @@ export function readIfcSource(text: string, opts: IfcReadOptions): ImportSource 
     const own = frame ? geo.entity(placed?.args[1]) : null;
     const stated = (i: number): boolean => own?.type === "IFCAXIS2PLACEMENT3D" && geo.entity(own.args[i])?.type === "IFCDIRECTION";
     const systemType = enumOf(port.args[9]);
+    const domain = PORT_CONNECTS[enumOf(port.args[8]) ?? ""] ?? null;
     return [
       {
         id,
@@ -317,9 +408,9 @@ export function readIfcSource(text: string, opts: IfcReadOptions): ImportSource 
         connectedTo: (joined.get(pid) ?? []).flatMap((j) => gid(j) ?? []),
         direction: frame && stated(1) ? frame.z : null,
         across: frame && stated(2) ? frame.x : null,
-        domain: PORT_CONNECTS[enumOf(port.args[8]) ?? ""] ?? null,
+        domain,
         systemType: unset(systemType) ? null : systemType,
-        size: portSize(pid),
+        ...portFacts(pid, domain),
       },
     ];
   };

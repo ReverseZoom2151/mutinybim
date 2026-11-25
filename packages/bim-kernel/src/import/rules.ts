@@ -409,7 +409,7 @@ const NO_KIND = "nothing in the file says what it connects to";
 const along = (v: ImportPoint, axis: ImportPoint): number => v.x * axis.x + v.y * axis.y + v.z * axis.z;
 /** A host-frame vector along the part's own axes. */
 const inSeat = (seat: PartSeat, v: ImportPoint): ImportPoint => ({ x: along(v, seat.axes.x), y: along(v, seat.axes.y), z: along(v, seat.axes.z) });
-/** A direction's part to a millionth, never -0: a unit vector read through a turned frame comes out the same every time. */
+/** A number to a millionth, never -0: a unit vector read through a turned frame, or a size through a unit conversion, comes out the same every time. */
 const unitPart = (n: number): number => Math.round(n * 1e6) / 1e6 + 0;
 
 /** A host-frame direction along the part's own axes, as a unit vector; null when it isn't a direction (no length, not a number). */
@@ -559,7 +559,7 @@ function partConnectors(ctx: ImportRuleContext, p: ImportProduct, seat: PartSeat
     const size = port.size;
     const across = size?.shape === "rect" ? seatDirection(seat, port.across) : null;
     const flowDirection = FLOW_DIRECTIONS[port.flow ?? ""];
-    const made = connectorSchema.safeParse({
+    const own = {
       id: ids.get(port),
       label: port.name?.trim().slice(0, 80) || `Connection ${byPlace.findIndex((r) => r.port === port) + 1}`,
       domain: kind.domain,
@@ -567,11 +567,15 @@ function partConnectors(ctx: ImportRuleContext, p: ImportProduct, seat: PartSeat
       position: [at.x, at.y, at.z],
       direction,
       shape: size?.shape ?? "none",
-      ...(size?.shape === "rect" ? { width: round(size.width), height: round(size.height) } : size?.shape === "round" ? { diameter: round(size.diameter) } : {}),
+      // An opening keeps the size the file gives it (31.75 mm is a size of its own, not 31.8): only the noise of a unit conversion is taken off.
+      ...(size?.shape === "rect" ? { width: unitPart(size.width), height: unitPart(size.height) } : size?.shape === "round" ? { diameter: unitPart(size.diameter) } : {}),
       ...(flowDirection ? { flowDirection } : {}),
       // The width's direction completes a rectangular opening's frame; one not square to the way it faces says nothing.
       ...(across && Math.abs(across[0] * direction[0] + across[1] * direction[1] + across[2] * direction[2]) < 0.01 ? { widthAxis: across } : {}),
-    });
+    };
+    // The numbers the file rates it at go on the connector's own fields; where the connector can't take them, it comes in without.
+    const rated = connectorSchema.safeParse({ ...port.rated, ...own });
+    const made = rated.success ? rated : connectorSchema.safeParse(own);
     if (!made.success) {
       leave("it couldn't be read");
       continue;

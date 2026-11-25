@@ -83,6 +83,11 @@ export interface ImportPort {
   readonly systemType?: string | null;
   /** The size of its opening, mm. Absent or null: the file doesn't say, or it has none. */
   readonly size?: ImportPortSize | null;
+  /**
+   * Numbers the file gives for a connector's own optional fields, by the connector field's name and in that field's
+   * unit (the reader converts). A rule keeps the ones the connector schema takes. Absent or null: the file gives none.
+   */
+  readonly rated?: Readonly<Record<string, number>> | null;
 }
 
 /** A port's opening: a rectangle (its width and height) or a circle (its diameter), mm. */
