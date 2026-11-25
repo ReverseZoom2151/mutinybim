@@ -11,7 +11,7 @@
  *
  * Fails on round 8b's code: there is no import landing (`landImportChunk`).
  */
-import { DEFAULT_SETTINGS, asElementId, asRevision, importChunks, landImport, landImportChunk, usesDropped, withoutDropped, type BimElement, type MepSystem, type ModelState, type Opening, type PortRef, type RunFitting, type RunSegment, type Wall } from "@permitzip/bim-kernel";
+import { DEFAULT_SETTINGS, asElementId, asRevision, importChunks, landImport, landImportChunk, usesDropped, withoutDropped, type BimElement, type MepSystem, type ModelState, type Opening, type PartInstance, type PortRef, type RunFitting, type RunSegment, type Wall } from "@permitzip/bim-kernel";
 
 const level: BimElement = { id: asElementId("L1"), kind: "level", version: 1, authoredRev: {}, name: "Level 1", elevationMm: 0 };
 const model: ModelState = { modelId: "i9-apply", revision: asRevision(1), elements: { L1: level }, connections: [], settings: DEFAULT_SETTINGS };
@@ -58,6 +58,11 @@ function elbow(id: string, a: PortRef, b: PortRef): RunFitting {
   };
 }
 
+/** A placed part joined by its connectors, as an import brings one in. */
+function unit(id: string, links: PartInstance["links"]): PartInstance {
+  return { id: asElementId(id), kind: "part", version: 0, authoredRev: {}, partition, provenance, typeId: asElementId("imp.a.type"), levelId: level.id, position: { x: 0, y: 0 }, offsetMm: 3000, rotationDeg: 0, mark: "U-1", values: {}, ...(links ? { links } : {}) };
+}
+
 const ids = (chunks: readonly (readonly BimElement[])[]) => chunks.map((c) => c.map((r) => r.id));
 
 describe("i9-import-apply", () => {
@@ -101,6 +106,9 @@ describe("i9-import-apply", () => {
     const host = piece("imp.a.s4", 7, {}, ["imp.a.f2"]);
     const tap: RunFitting = { ...elbow("imp.a.f2", ref("imp.a.s5", "start"), ref("imp.a.s5", "start")), fittingType: "tap", ports: [], host: { segmentId: host.id, s: 1500, side: 1 } };
     expect(ids(importChunks([host, w1, w2, tap], 2))).toEqual([["imp.a.w1", "imp.a.w2"], ["imp.a.s4", "imp.a.f2"]]);
+    // A part and the run on its connector are with each other as well.
+    const fed = piece("imp.a.s6", 0, { start: ref("imp.a.u1", "supply") });
+    expect(ids(importChunks([unit("imp.a.u1", { supply: ref("imp.a.s6", "start") }), w1, w2, w3, fed], 2))).toEqual([["imp.a.w1", "imp.a.w2"], ["imp.a.w3"], ["imp.a.u1", "imp.a.s6"]]);
   });
 
   it("joined records that outnumber the chunk size land whole, and a long chain is grouped in near-linear time", () => {
@@ -154,6 +162,16 @@ describe("i9-import-apply", () => {
     expect(withoutDropped([host, tap, branch], new Set([host.id]))).toEqual([{ ...branch, links: {} }]);
     // The tap is dropped: the trunk no longer lists it.
     expect(withoutDropped([host, tap, branch], new Set([tap.id]))).toEqual([{ ...host, branches: [] }, { ...branch, links: {} }]);
+    // A part and the runs on its connectors: whichever is dropped, the other stays with that connector or end open, and its other joins kept.
+    const fed = piece("imp.a.s6", 0, { start: ref("imp.a.u1", "supply"), end: ref("imp.a.f1", "a") });
+    const two = unit("imp.a.u1", { supply: ref("imp.a.s6", "start"), return: ref("imp.a.s7", "start") });
+    expect(usesDropped(fed, two.id)).toBe(false);
+    expect(usesDropped(two, fed.id)).toBe(false);
+    expect(usesDropped(two, asElementId("imp.a.type"))).toBe(true);
+    expect(withoutDropped([two, fed], new Set([two.id]))).toEqual([{ ...fed, links: { end: ref("imp.a.f1", "a") } }]);
+    expect(withoutDropped([two, fed], new Set([fed.id]))).toEqual([unit("imp.a.u1", { return: ref("imp.a.s7", "start") })]);
+    const [bare] = withoutDropped([unit("imp.a.u1", { supply: ref("imp.a.s6", "start") }), fed], new Set([fed.id]));
+    expect(bare && "links" in bare).toBe(false);
     // Nothing dropped: the same records.
     expect(withoutDropped([s1, s2, f1], new Set())).toEqual([s1, s2, f1]);
 

@@ -5,7 +5,7 @@ import { elementsOfKind } from "../store";
 import type { BimElement, ElementId, Level, ModelState, ParamValue } from "../types";
 import { IFC_IMPORT_RULE_POINT, type ImportRuleContext, type ImportRuleDef } from "./rule-point";
 import { reverseClassMap } from "./reverse-map";
-import { joinRuns } from "./joins";
+import { joinRuns, partConnectorAt } from "./joins";
 import { importElementId } from "./rules";
 import type { IfcImportPlan, IfcImportReport, ImportClassLine, ImportGroup, ImportJoin, ImportPort, ImportProduct, ImportSource } from "./types";
 
@@ -147,8 +147,21 @@ function planInScope(source: ImportSource, opts: PlanImportOptions): IfcImportPl
       for (const product of source.products) for (const own of product.ports) pointOwners.set(own.id, { product, port: own });
     }
     const owners = pointOwners;
-    return port.connectedTo.flatMap((id) => owners.get(id) ?? []);
+    return port.connectedTo.flatMap((id) => {
+      const far = owners.get(id);
+      if (!far) return [];
+      // A part's connectors have ids of their own: say which one this point is, by where it sits.
+      const record = convertedRecord(far.product.sourceId);
+      if (record?.kind !== "part") return [far];
+      const type = planned(record.typeId);
+      const level = planned(record.levelId);
+      const at = far.port.position;
+      const found = at && type?.kind === "part_type" ? partConnectorAt(record, type, level?.kind === "level" ? level.elevationMm : 0, at, opts.model.settings.connectorToleranceMm) : null;
+      return [{ ...far, connector: found?.connector.id ?? null }];
+    });
   };
+  /** A record of the plan as it stands, or one the model already has (a level a storey matched). */
+  const planned = (id: ElementId): BimElement | undefined => byId.get(id) ?? opts.model.elements[id];
   const convertedRecord = (sourceId: string): BimElement | null => {
     const id = converted.get(sourceId);
     return id ? (byId.get(id) ?? null) : null;
@@ -218,7 +231,7 @@ function planInScope(source: ImportSource, opts: PlanImportOptions): IfcImportPl
     if (own) converted.set(product.sourceId, own.id);
     line(cls.id, cls.id, cls.label).converted += 1;
   }
-  joinRuns({ source, record: (id) => byId.get(id), replace, converted: convertedRecord, joinedTo, level: levelFor, note, toleranceMm: opts.model.settings.connectorToleranceMm });
+  joinRuns({ source, record: planned, replace, converted: convertedRecord, joinedTo, level: levelFor, note, toleranceMm: opts.model.settings.connectorToleranceMm });
   for (const u of source.unreadable) {
     const match = u.classHint && map.choose({ entity: u.entity, ...u.classHint });
     const cls = match?.ok ? match.choice.cls : match?.cls;

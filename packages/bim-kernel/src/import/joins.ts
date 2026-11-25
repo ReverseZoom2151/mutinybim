@@ -1,7 +1,8 @@
-import { angleBetween, dist3, sub3 } from "../routing/geometry";
-import { sameSize } from "../routing/rules";
-import type { RunFitting, RunPoint, RunSegment } from "../routing/types";
-import type { BimElement, ElementId, Level } from "../types";
+import { resolveConnectors } from "../parts";
+import { angleBetween, connectorAccepts, dist3, sub3, worldConnector, type WorldConnector } from "../routing/geometry";
+import { connectorDomainOf, sameSize } from "../routing/rules";
+import type { PortRef, RunDomain, RunFitting, RunPoint, RunSegment, RunSize } from "../routing/types";
+import type { BimElement, ElementId, Level, PartInstance, PartTypeElement } from "../types";
 import type { ImportJoin, ImportPoint, ImportPort, ImportProduct, ImportSource } from "./types";
 
 /**
@@ -15,8 +16,11 @@ import type { ImportJoin, ImportPoint, ImportPort, ImportProduct, ImportSource }
  *   on lists it.
  * - Two straight pieces the file joins end to end are linked to each other
  *   when they run straight on at one size in one system.
- * - A join whose far side has no connection point here (a part, until parts
- *   keep theirs) or didn't come in is counted, with the reason.
+ * - A run's end, or a fitting's opening, on a part is linked to the part's
+ *   connector that sits there, and the part to it, when the connector takes
+ *   that run (its kind, what it carries, its size), as the model checks.
+ * - A join whose far side didn't come in, or has no connection point there,
+ *   is counted, with the reason.
  *
  * Nothing is left half made: a link that can't be written on both sides is
  * taken off the side that had it. Reads each connection point once and keeps
@@ -44,8 +48,8 @@ export interface JoinRunsInput {
 const STRAIGHT_DEG = 0.5;
 
 const CROWDED = "the file joins more than one thing to that end of the run";
-const NO_POINT_ON_PART = "one side is a part, and a part's connection points aren't brought in yet";
-const NO_POINT = "one side came in as something that has no connection points here";
+const NO_CONNECTOR = "one side is a part, and that connection point of it wasn't brought in";
+const NO_POINT = "neither side came in as a run, and a join here has a run on one side";
 const NOT_READ = "the fitting came in without that join";
 
 function segmentOf(input: JoinRunsInput, id: ElementId): RunSegment | null {
@@ -71,6 +75,61 @@ function nearestEnd(seg: RunSegment, floorMm: number, at: ImportPoint): End {
 
 const pairKey = (a: string, b: string): string => (a < b ? `${a}~${b}` : `${b}~${a}`);
 
+/** A part's connector with its height from the model's zero. */
+function connectorFrom(part: PartInstance, connector: WorldConnector["connector"], floorMm: number): WorldConnector {
+  const world = worldConnector(part, connector);
+  return { ...world, position: { ...world.position, z: world.position.z + floorMm } };
+}
+
+/** The connector of a converted part that sits at a point of the file (heights from the model's zero): the nearest within `tolMm`. */
+export function partConnectorAt(part: PartInstance, type: PartTypeElement, floorMm: number, at: ImportPoint, tolMm: number): WorldConnector | null {
+  let best: WorldConnector | null = null;
+  let gap = tolMm;
+  for (const connector of resolveConnectors(type.definition, part.values)) {
+    const world = connectorFrom(part, connector, floorMm);
+    const d = dist3(world.position, at);
+    if (d <= gap) [best, gap] = [world, d];
+  }
+  return best;
+}
+
+function floorOf(input: JoinRunsInput, levelId: ElementId): number {
+  const level = input.record(levelId);
+  return level?.kind === "level" ? level.elevationMm : 0;
+}
+
+/** What a run brings to a part's connector: where it ends (heights from the model's zero), its size, and what it is. */
+interface RunSide {
+  readonly at: RunPoint;
+  readonly size: RunSize;
+  readonly domain: RunDomain;
+  readonly systemId: ElementId;
+}
+
+/**
+ * Whether a part's connector takes a run's end or a fitting's opening, checked the way the model checks a link when
+ * it lands. The part, or why they can't be joined.
+ */
+function partTakes(input: JoinRunsInput, partId: ElementId, connectorId: string, run: RunSide, from: PortRef): PartInstance | string {
+  const part = input.record(partId);
+  if (part?.kind !== "part") return NO_POINT;
+  const type = input.record(part.typeId);
+  const connector = type?.kind === "part_type" ? resolveConnectors(type.definition, part.values).find((c) => c.id === connectorId) : undefined;
+  if (!connector) return NO_CONNECTOR;
+  const have = part.links?.[connectorId];
+  if (have && (have.elementId !== from.elementId || have.port !== from.port)) return "the file joins more than one thing to that connection point of the part";
+  if (dist3(connectorFrom(part, connector, floorOf(input, part.levelId)).position, run.at) > input.toleranceMm) return "the run doesn't end at the part's connection point";
+  if (connector.domain !== connectorDomainOf(run.domain)) return "the part's connection point there is for a different kind of run";
+  const system = input.record(run.systemId);
+  if (system?.kind !== "mep_system" || connector.systemKind !== system.systemKind) return "the part's connection point there carries something other than the run's system does";
+  if (!connectorAccepts(connector, run.size)) return "the run is a different size from the part's connection point, with no fitting between them";
+  return part;
+}
+
+function linkPart(input: JoinRunsInput, part: PartInstance, connectorId: string, to: PortRef): void {
+  input.replace({ ...part, links: { ...(part.links ?? {}), [connectorId]: to } });
+}
+
 /**
  * Make a converted fitting's links mutual: each straight piece an opening names gets the link back, and the run a
  * branch fitting sits on lists it. An opening whose piece can't take the link is left open, with the reason kept for
@@ -80,8 +139,23 @@ function closeFittingLinks(input: JoinRunsInput, fittingId: ElementId, unmade: M
   const fitting = fittingOf(input, fittingId);
   if (!fitting) return;
   let changed = false;
+  const floor = floorOf(input, fitting.levelId);
   const ports = fitting.ports.map((port) => {
     if (!port.link) return port;
+    const open = { id: port.id, position: port.position, direction: port.direction, size: port.size };
+    if (input.record(port.link.elementId)?.kind === "part") {
+      // An opening on a part: the part's connector there gets the link back, when it takes this opening.
+      const own = { elementId: fitting.id, port: port.id };
+      const at = { x: port.position.x, y: port.position.y, z: port.position.z + floor };
+      const part = partTakes(input, port.link.elementId, port.link.port, { at, size: port.size, domain: fitting.domain, systemId: fitting.systemId }, own);
+      if (typeof part !== "string") {
+        linkPart(input, part, port.link.port, own);
+        return port;
+      }
+      changed = true;
+      unmade.set(pairKey(fitting.id, port.link.elementId), part);
+      return open;
+    }
     const seg = segmentOf(input, port.link.elementId);
     const end = port.link.port === "start" || port.link.port === "end" ? port.link.port : null;
     const back = seg && end ? seg.links[end] : undefined;
@@ -92,7 +166,7 @@ function closeFittingLinks(input: JoinRunsInput, fittingId: ElementId, unmade: M
     }
     changed = true;
     unmade.set(pairKey(fitting.id, port.link.elementId), seg ? CROWDED : NO_POINT);
-    return { id: port.id, position: port.position, direction: port.direction, size: port.size };
+    return open;
   });
   if (changed) input.replace({ ...fitting, ports });
   if (!fitting.host) return;
@@ -100,9 +174,26 @@ function closeFittingLinks(input: JoinRunsInput, fittingId: ElementId, unmade: M
   if (host && !host.branches.includes(fitting.id)) input.replace({ ...host, branches: [...host.branches, fitting.id] });
 }
 
-/** Whether a fitting and a straight piece are joined now: an opening linked to the piece, or the fitting sitting on it. */
-function fittingOnSegment(fitting: RunFitting, seg: RunSegment): boolean {
-  return fitting.host?.segmentId === seg.id || fitting.ports.some((p) => p.link?.elementId === seg.id);
+/** Whether a fitting and another record are joined now: an opening linked to it, or the fitting sitting on it. */
+function fittingOn(fitting: RunFitting, other: BimElement): boolean {
+  return fitting.host?.segmentId === other.id || fitting.ports.some((p) => p.link?.elementId === other.id);
+}
+
+/** Link a straight piece's end to the part's connector the file joins it to, on both records, or say why not. */
+function joinSegmentToPart(input: JoinRunsInput, segId: ElementId, segProduct: ImportProduct, at: ImportPoint | null, partId: ElementId, connectorId: string | null | undefined): string | null {
+  const seg = segmentOf(input, segId);
+  if (!seg) return NO_POINT;
+  if (!connectorId) return NO_CONNECTOR;
+  if (!at) return "the file doesn't say where they meet";
+  const floor = input.level(segProduct)?.elevationMm ?? 0;
+  const end = nearestEnd(seg, floor, at);
+  if (seg.links[end]) return CROWDED;
+  const own = { elementId: seg.id, port: end };
+  const part = partTakes(input, partId, connectorId, { at: endPoint(seg, end, floor), size: seg.size, domain: seg.domain, systemId: seg.systemId }, own);
+  if (typeof part === "string") return part;
+  input.replace({ ...seg, links: { ...seg.links, [end]: { elementId: part.id, port: connectorId } } });
+  linkPart(input, part, connectorId, own);
+  return null;
 }
 
 /** Link two straight pieces at the ends the file joins, or say why not. */
@@ -182,15 +273,22 @@ export function joinRuns(input: JoinRunsInput): void {
           stayed += 1;
           continue;
         }
-        const run = (r: BimElement): r is RunSegment | RunFitting => r.kind === "run_segment" || r.kind === "run_fitting";
         if (here.kind === "run_segment" && there.kind === "run_segment") {
           const why = joinSegments(input, here.id, product, port, there.id, other);
           if (why) count(why);
-        } else if (run(here) && run(there)) {
-          const [fitting, seg] = here.kind === "run_fitting" ? [here, there] : [there, here];
-          const made = fitting.kind === "run_fitting" && seg.kind === "run_segment" && fittingOnSegment(fitting, seg);
+        } else if (here.kind === "run_fitting" || there.kind === "run_fitting") {
+          // A fitting's own rule read this join; its links were made mutual above.
+          const made = (here.kind === "run_fitting" && fittingOn(here, there)) || (there.kind === "run_fitting" && fittingOn(there, here));
           if (!made) count(stripped.get(pairKey(here.id, there.id)) ?? NOT_READ);
-        } else count(here.kind === "part" || there.kind === "part" ? NO_POINT_ON_PART : NO_POINT);
+        } else if (here.kind === "run_segment" && there.kind === "part") {
+          const why = joinSegmentToPart(input, here.id, product, port.position ?? other.port.position, there.id, other.connector);
+          if (why) count(why);
+        } else if (here.kind === "part" && there.kind === "run_segment") {
+          // Seen from the part: which of its connectors this point is comes from the run's side of the join.
+          const mine = input.joinedTo(other.port).find((j) => j.port.id === port.id);
+          const why = joinSegmentToPart(input, there.id, other.product, other.port.position ?? port.position, here.id, mine?.connector);
+          if (why) count(why);
+        } else count(NO_POINT);
       }
     }
   }

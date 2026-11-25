@@ -33,7 +33,8 @@ export interface ImportRuleContext {
   /**
    * What the file joins a connection point to: each far point with the product it is on (a fitting reads the runs
    * its openings join). Empty when the file joins it to nothing; a far point on a product the reader left out is
-   * skipped. Whether that product converted is `converted(join.product.sourceId)`.
+   * skipped. Whether that product converted is `converted(join.product.sourceId)`; when it became a part,
+   * `join.connector` is the id of the part's connector at that point.
    */
   joinedTo(port: ImportPort): readonly ImportJoin[];
   /** A group the file assigns products to (a distribution system). */

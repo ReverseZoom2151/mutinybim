@@ -97,6 +97,11 @@ export type ImportPortSize = { readonly shape: "rect"; readonly width: number; r
 export interface ImportJoin {
   readonly product: ImportProduct;
   readonly port: ImportPort;
+  /**
+   * Set when that product has become a part: the id of the part's connector that sits at this point, or null when
+   * none does (the point wasn't brought in as a connector). Absent: the product isn't a part, or hasn't converted.
+   */
+  readonly connector?: string | null;
 }
 
 export interface ImportProduct {

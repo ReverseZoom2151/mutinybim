@@ -10,7 +10,7 @@
  * part's own point along its own axes. A port the file gives no position, or
  * says nothing of the kind of, stays out, and the report says how many and why.
  */
-import { DEFAULT_SETTINGS, asRevision, gatedRecordFeatures, landImport, resolveConnectors, worldConnector, type BimElement, type ModelState, type PartConnector, type PartInstance } from "@permitzip/bim-kernel";
+import { DEFAULT_SETTINGS, asRevision, gatedRecordFeatures, landImport, planIfcImport, resolveConnectors, worldConnector, type BimElement, type ModelState, type PartConnector, type PartInstance } from "@permitzip/bim-kernel";
 import { runScript, sliceModel, type ScriptDefinition } from "@permitzip/bim-script";
 import { PROTOCOL_FEATURES } from "@permitzip/bim-sync";
 import { exportIfc, importIfc, readIfcSource } from "../src";
@@ -136,9 +136,12 @@ describe("importIfc brings a part's connection points back (#65)", () => {
 
 describe("an imported part can be connected by hand (#65)", () => {
   it("rooftop-unit: a duct routes from the imported unit's supply opening and is joined to it", async () => {
-    const { plan, pairs } = roundTrip(await build(rooftopUnit));
-    const unit = pairs[0]?.got;
+    // A file that joins the unit to nothing (its port joins left out): the unit comes in with its openings free. With the joins, it comes in joined (import-run-fittings).
+    const read = readIfcSource(exportIfc({ model: await build(rooftopUnit), project: PROJECT, timeStamp: TIME_STAMP }).text, SOURCE);
+    const plan = planIfcImport({ ...read, products: read.products.map((p) => ({ ...p, ports: p.ports.map((port) => ({ ...port, connectedTo: [] })) })) }, { model: EMPTY, ...SOURCE });
+    const unit = ofKind(plan.records, "part")[0];
     if (!unit) throw new Error("the unit didn't come back");
+    expect(unit.links).toBeUndefined();
     const m = new Log(landImport(EMPTY, plan.records).model);
     m.ok({
       type: "route_run",

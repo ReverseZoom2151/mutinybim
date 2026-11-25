@@ -6,15 +6,17 @@
  * tap came back as nothing ("no class in this model takes it"), and every
  * straight piece came back with no links. A fitting now converts from what
  * the file joins its openings to, and each join the file states between two
- * converted pieces is made on both sides. What can't convert stays on the
- * linked model with its reason, and a join that can't be made is listed in
- * the report.
+ * converted records (run to run, run to fitting, run or fitting to a part's
+ * connector) is made on both sides. What can't convert stays on the linked
+ * model with its reason, and a join that can't be made is listed in the
+ * report.
  */
-import { DEFAULT_SETTINGS, asRevision, gatedRecordFeatures, importChunks, landImport, planIfcImport, validateModel, type BimElement, type IfcImportPlan, type ImportProduct, type ImportSource, type ModelState, type PortRef, type RunFitting, type RunSegment } from "@permitzip/bim-kernel";
-import { runScript, sliceModel, type ScriptDefinition } from "@permitzip/bim-script";
+import { DEFAULT_SETTINGS, GLOBAL_PARTITION, KERNEL_IMPORT_RULES, asRevision, gatedRecordFeatures, importChunks, landImport, planIfcImport, validateModel, type BimElement, type IfcImportPlan, type ImportPort, type ImportProduct, type ImportRuleDef, type ImportSource, type MepSystem, type ModelState, type PortRef, type RunSegment } from "@permitzip/bim-kernel";
+import { building, defineScript, equipment, parts, routes, runScript, sliceModel, units, type ScriptDefinition } from "@permitzip/bim-script";
 import { PROTOCOL_FEATURES } from "@permitzip/bim-sync";
-import { exportIfc, importIfc, readIfcSource, readStep } from "../src";
+import { exportIfc, importIfc, readIfcSource } from "../src";
 import { Log } from "../../bim-kernel/__tests__/a13a-fixtures";
+import plumbingRiser from "../../bim-script/examples/plumbing-riser";
 import rooftopUnit from "../../bim-script/examples/rooftop-unit";
 import { IfcText, hostModel } from "./i9-fixtures";
 
@@ -68,11 +70,12 @@ function expectLinksMutual(records: readonly BimElement[]) {
     const el = byId.get(ref.elementId);
     if (el?.kind === "run_segment") return ref.port === "start" ? el.links.start : ref.port === "end" ? el.links.end : undefined;
     if (el?.kind === "run_fitting") return el.ports.find((p) => p.id === ref.port)?.link;
+    if (el?.kind === "part") return el.links?.[ref.port];
     return undefined;
   };
   let seen = 0;
   for (const r of records) {
-    const mine: Array<readonly [string, PortRef | undefined]> = r.kind === "run_segment" ? [["start", r.links.start], ["end", r.links.end]] : r.kind === "run_fitting" ? r.ports.map((p) => [p.id, p.link] as const) : [];
+    const mine: Array<readonly [string, PortRef | undefined]> = r.kind === "run_segment" ? [["start", r.links.start], ["end", r.links.end]] : r.kind === "run_fitting" ? r.ports.map((p) => [p.id, p.link] as const) : r.kind === "part" ? Object.entries(r.links ?? {}) : [];
     for (const [port, link] of mine) {
       if (!link) continue;
       seen += 1;
@@ -99,7 +102,7 @@ function expectChunksWhole(records: readonly BimElement[], size?: number) {
   for (const chunk of chunks) {
     const here = new Set(chunk.map((r) => r.id as string));
     for (const r of chunk) {
-      const far = r.kind === "run_segment" ? [r.links.start?.elementId, r.links.end?.elementId, ...r.branches] : r.kind === "run_fitting" ? [...r.ports.map((p) => p.link?.elementId), r.host?.segmentId] : [];
+      const far = r.kind === "run_segment" ? [r.links.start?.elementId, r.links.end?.elementId, ...r.branches] : r.kind === "run_fitting" ? [...r.ports.map((p) => p.link?.elementId), r.host?.segmentId] : r.kind === "part" ? Object.values(r.links ?? {}).map((l) => l.elementId) : [];
       for (const id of far) if (id) expect(here.has(id)).toBe(true);
     }
   }
@@ -107,12 +110,12 @@ function expectChunksWhole(records: readonly BimElement[], size?: number) {
 }
 
 function runIssues(model: ModelState) {
-  const runIds = new Set(Object.values(model.elements).filter((e) => e.kind === "run_fitting" || e.kind === "run_segment").map((e) => e.id as string));
+  const runIds = new Set(Object.values(model.elements).filter((e) => e.kind === "run_fitting" || e.kind === "run_segment" || e.kind === "part").map((e) => e.id as string));
   return validateModel(model).filter((i) => i.elementIds.some((id) => runIds.has(id)));
 }
 
-/** rooftop-unit with a transition and cap on the supply, the return carried straight on, and a round tap off the return's side. */
-async function withBranch() {
+/** rooftop-unit with a transition and cap on the supply, the return carried straight on, a round tap off the return's side and another off the top of the piece after it, off its centre line. */
+async function withBranches() {
   const log = await build(rooftopUnit);
   const open = (name: string): RunSegment => {
     const system = Object.values(log.head.elements).find((e) => e.kind === "mep_system" && e.name === name);
@@ -129,24 +132,46 @@ async function withBranch() {
   log.ok({ type: "route_run", idPrefix: "on", levelId: ret.levelId, domain: "duct", size: ret.size, system: { id: ra.id, kind: ra.systemKind }, from: { kind: "run_end", elementId: ret.id, port: "end" }, points: [{ x: ret.end.x + 6 * FT, y: ret.end.y }] });
   const tapX = ret.start.x + 8 * FT;
   log.ok({ type: "route_run", idPrefix: "branch", levelId: ret.levelId, domain: "duct", size: { shape: "round", diameter: 254 }, system: { id: ra.id, kind: ra.systemKind }, from: { kind: "run_branch", segmentId: ret.id }, points: [{ x: tapX, y: ret.start.y }, { x: tapX, y: ret.start.y + 8 * FT }] });
+  // Up out of the top of the next piece, 150 mm off its centre line.
+  const topX = ret.end.x + 3 * FT;
+  const round8 = { shape: "round", diameter: 203.2 } as const;
+  const system = { id: ra.id, kind: ra.systemKind };
+  const top = ret.end.z + (ret.size.shape === "rect" ? ret.size.height / 2 : 0);
+  // A drop from above that ends over the point, then on down onto the trunk's top.
+  log.ok({ type: "route_run", idPrefix: "drop", levelId: ret.levelId, domain: "duct", size: round8, elevationMm: top + 4 * FT, system, points: [{ x: topX, y: ret.end.y + 6 * FT }, { x: topX, y: ret.end.y + 150, elevationMm: top + 3 * FT }] });
+  log.ok({ type: "route_run", idPrefix: "up", levelId: ret.levelId, domain: "duct", size: round8, elevationMm: top, system, points: [{ x: topX, y: ret.end.y + 150 }], from: { kind: "run_end", elementId: "drop-s2", port: "end" }, to: { kind: "run_branch", segmentId: "on-s1", face: "top", t: 150 } });
   const model = log.head;
   const fittings = ofKind(Object.values(model.elements), "run_fitting");
   const transition = fittings.find((f) => f.fittingType === "transition");
   const cap = fittings.find((f) => f.fittingType === "cap");
-  const tap = fittings.find((f) => f.host !== undefined);
-  if (!transition || !cap || !tap) throw new Error(`fixture: ${fittings.map((f) => f.fittingType).join(", ")}`);
+  const tap = fittings.find((f) => f.host?.segmentId === ret.id);
+  const topTap = fittings.find((f) => f.host?.segmentId === "on-s1");
+  if (!transition || !cap || !tap || !topTap) throw new Error(`fixture: ${fittings.map((f) => f.fittingType).join(", ")}`);
   const trunk = model.elements[ret.id];
-  const level = model.elements[tap.levelId];
-  if (trunk?.kind !== "run_segment" || level?.kind !== "level") throw new Error("fixture: trunk");
-  /** Where the tap sits on the trunk's centre line, from the model's zero. */
-  const onTrunk = { x: tap.position.x, y: tap.position.y, z: tap.position.z + level.elevationMm };
-  return { model, transition, cap, tap, trunk, onTrunk };
+  if (trunk?.kind !== "run_segment") throw new Error("fixture: trunk");
+  return { model, fittings, transition, cap, tap, topTap, trunk };
 }
+
+/** A unit whose opening is smaller than the duct routed from it, so a transition sits right on the opening: a fitting joined to a part. */
+const unitWithTransition = defineScript({
+  kind: "route",
+  reads: { levels: true },
+  parameters: {},
+  run(ctx) {
+    const level = building.level(ctx, { name: "Level 1", elevation: units.ft(0) });
+    const fan = parts.part("Fan box", { type: "Small", category: "mechanical_equipment" });
+    fan.box({ length: units.in(48), width: units.in(48), height: units.in(36) });
+    fan.connector("bottom", { id: "supply", label: "Supply", domain: "duct", systemKind: "supply_air", shape: "rect", width: units.mm(500), height: units.mm(300), offset: [units.in(0), units.in(0)] });
+    ctx.edit({ type: "save_part_types", label: "Fan box", types: [{ typeId: "test.fan", definition: fan.build() }] });
+    const unit = equipment.place(ctx, { level, type: "test.fan", at: { x: units.ft(20), y: units.ft(10) }, height: units.ft(14), mark: "F-1" });
+    routes.along(ctx, { level, domain: "duct", size: routes.rect(units.mm(700), units.mm(300)), system: { id: "sa-1", kind: "supply_air", name: "Supply air" }, height: units.ft(10), from: unit.connector("supply"), points: [{ x: units.ft(10), y: units.ft(10) }] });
+  },
+});
 
 const NO_PLACE = "it branches off the side of a run, and the file doesn't say where on that run";
 
 describe("importIfc: run fittings and the joins through them (#59, #66)", () => {
-  it("brings rooftop-unit's elbows back as fittings joined to the duct on both sides", async () => {
+  it("brings rooftop-unit's elbows back as fittings, and all six of the file's joins back on both records", async () => {
     const model = (await build(rooftopUnit)).head;
     const { ifc, plan, twin, twinRef, fittings, segments } = roundTrip(model);
     expect(fittings).toHaveLength(2);
@@ -185,18 +210,26 @@ describe("importIfc: run fittings and the joins through them (#59, #66)", () => 
       }
     }
 
-    // Of the file's six joins, the four between duct and elbow are on both records. The two onto the rooftop unit wait for a part's connection points (#65), and the report says so.
+    // Every end of every duct is joined to what it was: four ends on the elbows, two on the rooftop unit's supply and return openings.
+    let ends = 0;
     for (const s of segments) {
       const back = twin(s.id);
       if (back?.kind !== "run_segment") throw new Error(`${s.id} did not come back as a run segment`);
       for (const end of ["start", "end"] as const) {
-        const link = s.links[end];
-        const onFitting = link !== undefined && model.elements[link.elementId]?.kind === "run_fitting";
-        expect(back.links[end]).toEqual(onFitting ? twinRef(link) : undefined);
+        expect(back.links[end]).toEqual(twinRef(s.links[end]));
+        if (back.links[end]) ends += 1;
       }
     }
-    expect(expectLinksMutual(plan.records)).toBe(8);
-    expect(joinNotes(plan)).toEqual(["2 joins in the file weren't made (one side is a part, and a part's connection points aren't brought in yet); the ends there are open, so join them by hand"]);
+    expect(ends).toBe(6);
+    // The rooftop unit names the two ducts back, by its own connectors.
+    const [unit] = ofKind(Object.values(model.elements), "part");
+    const unitBack = twin(unit?.id ?? "");
+    if (!unit?.links || unitBack?.kind !== "part") throw new Error("the rooftop unit did not come back");
+    expect(Object.keys(unit.links).sort()).toEqual(["return", "supply"]);
+    expect(unitBack.links).toEqual({ supply: twinRef(unit.links.supply), return: twinRef(unit.links.return) });
+    // Six joins, each on both records: twelve link ends, every one answered. Nothing is left to report.
+    expect(expectLinksMutual(plan.records)).toBe(12);
+    expect(plan.report.notes).toEqual([]);
   });
 
   it("lands in a model whose checks find the runs joined, whole at every revision, at the usual chunk size and at 3", async () => {
@@ -205,27 +238,30 @@ describe("importIfc: run fittings and the joins through them (#59, #66)", () => 
     const landed = landImport(empty(), plan.records);
     expect(landed.dropped).toEqual([]);
     expect(ofKind(Object.values(landed.model.elements), "run_fitting")).toHaveLength(2);
-    expect(expectLinksMutual(Object.values(landed.model.elements))).toBe(8);
+    expect(expectLinksMutual(Object.values(landed.model.elements))).toBe(12);
     expect(runIssues(landed.model)).toEqual([]);
     expectChunksWhole(plan.records);
 
-    // A join is two records; cut every 3 records, the plan would split pairs, so joined pieces land together (a run of 3 joined pieces is one chunk).
+    // A join is two records; cut every 3 records, the plan would split pairs, so joined pieces land together (each duct run, from the unit's opening through its elbow, is one chunk of four).
     const chunks = expectChunksWhole(plan.records, 3);
     expect(chunks.length).toBeGreaterThan(2);
+    expect(chunks.filter((c) => c.length > 3).map((c) => c.map((r) => r.kind).sort())).toEqual([["part", "run_fitting", "run_segment", "run_segment", "run_fitting", "run_segment", "run_segment"].sort()]);
     const small = landImport(empty(), plan.records, { size: 3 });
     expect(small.dropped).toEqual([]);
     expect(small.revisions).toBe(chunks.length);
-    expect(expectLinksMutual(Object.values(small.model.elements))).toBe(8);
+    expect(expectLinksMutual(Object.values(small.model.elements))).toBe(12);
     expect(runIssues(small.model)).toEqual([]);
   });
 
-  it("brings back a transition, an end cap and a straight join; a branch fitting written without its place on the trunk stays linked with the reason", async () => {
-    const { model, transition, cap, tap, trunk } = await withBranch();
-    const { plan, twin, twinRef } = roundTrip(model);
+  it("brings back a transition, an end cap, a straight join and two taps, each tap on its trunk where it was", async () => {
+    const { model, fittings, transition, cap, tap, topTap, trunk } = await withBranches();
+    const { ifc, plan, twin, twinRef } = roundTrip(model);
+    // What the writer says of a branch fitting: a `Branch` port on the trunk at the branch point, joined to a `Trunk` port on the fitting.
+    expect(ifc.match(/IFCDISTRIBUTIONPORT\([^;]*'Branch'/g)).toHaveLength(2);
+    expect(ifc.match(/IFCDISTRIBUTIONPORT\([^;]*'Trunk'/g)).toHaveLength(2);
 
-    // Today's writer joins the tap to its branch only, so the file doesn't say where on the trunk it sits.
-    expect(fittingLine(plan)).toEqual({ classId: "mep.run_fitting", label: "Fittings", converted: 4, linked: [{ reason: NO_PLACE, count: 1 }] });
-
+    expect(fittingLine(plan)).toEqual({ classId: "mep.run_fitting", label: "Fittings", converted: fittings.length, linked: [] });
+    expect(fittings).toHaveLength(7);
     for (const f of [transition, cap]) {
       const back = twin(f.id);
       if (back?.kind !== "run_fitting") throw new Error(`${f.fittingType} did not come back as a fitting`);
@@ -248,14 +284,118 @@ describe("importIfc: run fittings and the joins through them (#59, #66)", () => 
     expect(trunk.links.end).toEqual({ elementId: "on-s1", port: "start" });
     expect(back.links.end).toEqual({ elementId: on.id, port: "start" });
     expect(on.links.start).toEqual({ elementId: back.id, port: "end" });
-    // The branch's own duct came in; its end on the tap is open, the trunk lists no branch, and the report says a join was left out.
-    expect(twin(tap.id)).toBeUndefined();
-    const branch = twin(tap.ports[0]?.link?.elementId ?? "");
-    expect(branch?.kind === "run_segment" ? branch.links.start : "?").toBeUndefined();
-    expect(back.branches).toEqual([]);
-    expect(joinNotes(plan)).toContain("1 join in the file wasn't made (one side stayed on the linked model); the end that came in is open there");
-    expectLinksMutual(plan.records);
 
+    // Each tap: on the same trunk, as far along it, leaving the same way, with its one opening on the branch.
+    expect(tap.host).toEqual({ segmentId: trunk.id, s: expect.any(Number), side: expect.any(Number) });
+    expect(topTap.host).toEqual({ segmentId: "on-s1", s: expect.any(Number), side: 1, face: "top", t: 150 });
+    for (const f of [tap, topTap]) {
+      const got = twin(f.id);
+      const host = twin(f.host?.segmentId ?? "");
+      const was = model.elements[f.host?.segmentId ?? ""];
+      if (got?.kind !== "run_fitting" || host?.kind !== "run_segment" || was?.kind !== "run_segment") throw new Error("a tap or its trunk did not come back");
+      expect(got.fittingType).toBe(f.fittingType);
+      expect(got.label).toBe(f.label);
+      expect(got.host).toEqual({ ...f.host, segmentId: host.id });
+      expect(got.position).toEqual(f.position);
+      expect(got.levelId).toBe(host.levelId);
+      expect(got.systemId).toBe(host.systemId);
+      // The trunk lists its branches again; the fitting's own port on the trunk in the file is not an opening of the fitting.
+      expect(host.branches).toEqual(was.branches.map((id) => twin(id)?.id));
+      expect(got.ports).toHaveLength(1);
+      const [port] = f.ports;
+      const [gotPort] = got.ports;
+      if (!port || !gotPort) throw new Error("fixture: the tap's branch");
+      expect(gotPort.id).toBe(port.id);
+      expect(gotPort.position).toEqual(port.position);
+      expect(near(gotPort.direction, port.direction)).toBeLessThan(1e-9);
+      expect(gotPort.size).toEqual(port.size);
+      expect(gotPort.link).toEqual(twinRef(port.link));
+      const branch = twin(port.link?.elementId ?? "");
+      expect(branch?.kind === "run_segment" ? branch.links[port.link?.port === "end" ? "end" : "start"] : null).toEqual({ elementId: got.id, port: gotPort.id });
+    }
+    // Every join in the file is made: nothing to report.
+    expect(plan.report.notes).toEqual([]);
+    expectLinksMutual(plan.records);
+    for (const size of [undefined, 3]) {
+      expectChunksWhole(plan.records, size);
+      const landed = landImport(empty(), plan.records, size ? { size } : {});
+      expect(landed.dropped).toEqual([]);
+      expect(runIssues(landed.model)).toEqual([]);
+      expect(Object.keys(landed.model.elements)).toHaveLength(plan.records.length);
+    }
+  });
+
+  describe("a branch fitting in a file that says less", () => {
+    /** The model's export as the reader sees it, its connection points changed before planning. */
+    async function planWithPorts(change: (port: ImportPort, product: ImportProduct) => ImportPort | null) {
+      const made = await withBranches();
+      const out = exportIfc({ model: made.model, project: PROJECT, timeStamp: TIME_STAMP });
+      const read = readIfcSource(out.text, READ);
+      const source: ImportSource = { ...read, products: read.products.map((p) => ({ ...p, ports: p.ports.flatMap((port) => change(port, p) ?? []) })) };
+      const plan = planIfcImport(source, { model: empty(), ...PLAN });
+      return { ...made, plan, ...twins(made.model, out.report.globalIds, plan) };
+    }
+
+    it("stays linked with the reason when the file has no point on the trunk (an older export, or another tool's)", async () => {
+      const { plan, twin, tap, topTap, trunk } = await planWithPorts((port) => (port.name === "Branch" || port.name === "Trunk" ? null : { ...port, connectedTo: port.connectedTo }));
+      expect(fittingLine(plan)).toEqual({ classId: "mep.run_fitting", label: "Fittings", converted: 5, linked: [{ reason: NO_PLACE, count: 2 }] });
+      // Each branch's own duct came in; its end on the tap is open, the trunk lists no branch, and the report says the joins were left out.
+      for (const f of [tap, topTap]) {
+        expect(twin(f.id)).toBeUndefined();
+        const branch = twin(f.ports[0]?.link?.elementId ?? "");
+        expect(branch?.kind === "run_segment" ? branch.links[f.ports[0]?.link?.port === "end" ? "end" : "start"] : "?").toBeUndefined();
+      }
+      const back = twin(trunk.id);
+      expect(back?.kind === "run_segment" ? back.branches : null).toEqual([]);
+      expect(joinNotes(plan)).toEqual(["2 joins in the file weren't made (one side stayed on the linked model); the end that came in is open there"]);
+      expectLinksMutual(plan.records);
+      for (const size of [undefined, 3]) {
+        expectChunksWhole(plan.records, size);
+        const landed = landImport(empty(), plan.records, size ? { size } : {});
+        expect(landed.dropped).toEqual([]);
+        expect(runIssues(landed.model)).toEqual([]);
+      }
+    });
+
+    it("comes back the same when no connection point says which way it faces: the branch's own first piece says which way out", async () => {
+      const { model, plan, twin, tap, topTap } = await planWithPorts((port) => ({ ...port, direction: null }));
+      expect(fittingLine(plan)).toEqual({ classId: "mep.run_fitting", label: "Fittings", converted: 7, linked: [] });
+      for (const f of [tap, topTap]) {
+        const got = twin(f.id);
+        const host = twin(f.host?.segmentId ?? "");
+        expect(got?.kind === "run_fitting" ? got.host : null).toEqual({ ...f.host, segmentId: host?.id });
+        expect(got?.kind === "run_fitting" ? got.position : null).toEqual(f.position);
+      }
+      expect(joinNotes(plan)).toEqual([]);
+      expect(landImport(empty(), plan.records).dropped).toEqual([]);
+      expect(model.elements[tap.id]).toBe(tap);
+    });
+  });
+
+  it("joins a fitting to a part: a transition right on a unit's opening comes back linked to the unit's connector, and the unit to it", async () => {
+    const model = (await build(unitWithTransition)).head;
+    const { plan, twin, twinRef, fittings } = roundTrip(model);
+    const [unit] = ofKind(Object.values(model.elements), "part");
+    const transition = fittings.find((f) => f.ports.some((p) => p.link?.elementId === unit?.id));
+    if (!unit?.links?.supply || !transition) throw new Error(`fixture: a transition on the unit (${fittings.map((f) => f.fittingType).join(", ")})`);
+    expect(transition.fittingType).toBe("transition");
+    expect(unit.links.supply.elementId).toBe(transition.id);
+
+    expect(fittingLine(plan)).toEqual({ classId: "mep.run_fitting", label: "Fittings", converted: fittings.length, linked: [] });
+    const back = twin(transition.id);
+    const unitBack = twin(unit.id);
+    if (back?.kind !== "run_fitting" || unitBack?.kind !== "part") throw new Error("the transition or the unit did not come back");
+    expect(back.position).toEqual(transition.position);
+    for (const port of transition.ports) {
+      const p = back.ports.find((x) => x.id === port.id);
+      expect(p?.position).toEqual(port.position);
+      expect(near(p?.direction ?? { x: NaN, y: NaN, z: NaN }, port.direction)).toBeLessThan(1e-9);
+      expect(p?.size).toEqual(port.size);
+      expect(p?.link).toEqual(twinRef(port.link));
+    }
+    expect(unitBack.links).toEqual({ supply: twinRef(unit.links.supply) });
+    expect(plan.report.notes).toEqual([]);
+    expectLinksMutual(plan.records);
     for (const size of [undefined, 3]) {
       expectChunksWhole(plan.records, size);
       const landed = landImport(empty(), plan.records, size ? { size } : {});
@@ -264,90 +404,85 @@ describe("importIfc: run fittings and the joins through them (#59, #66)", () => 
     }
   });
 
-  describe("a branch fitting whose place on its trunk the file states (a connection point on the trunk, joined to the fitting)", () => {
-    function expectTapBack(model: ModelState, tap: RunFitting, trunk: RunSegment, plan: IfcImportPlan, t: ReturnType<typeof twins>) {
-      expect(fittingLine(plan)).toEqual({ classId: "mep.run_fitting", label: "Fittings", converted: 5, linked: [] });
-      const back = t.twin(tap.id);
-      const host = t.twin(trunk.id);
-      if (back?.kind !== "run_fitting" || host?.kind !== "run_segment") throw new Error("the tap or its trunk did not come back");
-      expect(back.fittingType).toBe(tap.fittingType);
-      expect(back.label).toBe(tap.label);
-      // On the trunk the file names, as far along it as the trunk's connection point is, leaving from the same side.
-      expect(back.host).toEqual({ ...tap.host, segmentId: host.id });
-      expect(back.position).toEqual(tap.position);
-      expect(back.levelId).toBe(host.levelId);
-      expect(back.systemId).toBe(host.systemId);
-      expect(host.branches).toEqual([back.id]);
-      const [was] = tap.ports;
-      const [port] = back.ports;
-      if (!was || !port) throw new Error("fixture: the tap's branch");
-      expect(back.ports).toHaveLength(1);
-      expect(port.id).toBe(was.id);
-      expect(port.position).toEqual(was.position);
-      expect(near(port.direction, was.direction)).toBeLessThan(1e-9);
-      expect(port.size).toEqual(was.size);
-      expect(port.link).toEqual(t.twinRef(was.link));
-      const branch = t.twin(was.link?.elementId ?? "");
-      expect(branch?.kind === "run_segment" ? branch.links.start : null).toEqual({ elementId: back.id, port: port.id });
-      // Every join in the file between two runs is made; only the rooftop unit's two are left.
-      expect(joinNotes(plan)).toEqual(["2 joins in the file weren't made (one side is a part, and a part's connection points aren't brought in yet); the ends there are open, so join them by hand"]);
+  describe("plumbing-riser: a drain with a wye for each fixture arm", () => {
+    it("as the file is read today: the pipes stay linked (their material isn't in the file), so the fittings on them do too", async () => {
+      const model = (await build(plumbingRiser)).head;
+      const { plan, fittings, segments } = roundTrip(model);
+      expect([segments.length, fittings.length]).toEqual([22, 18]);
+      expect(plan.report.classes).toEqual([
+        { classId: "mep.plumbing_fixture", label: "Plumbing fixtures", converted: 8, linked: [] },
+        { classId: "mep.run_fitting", label: "Fittings", converted: 0, linked: [{ reason: "something it joins stays on the linked model", count: 18 }] },
+        { classId: "mep.pipe", label: "Pipe", converted: 0, linked: [{ reason: "its size needs the add-on that owns these runs' sizes (nominal size and material) to come in", count: 22 }] },
+      ]);
+      expect(plan.report.notes).toEqual([
+        "1 system wasn't brought in (Sanitary); anything in it that converted came in on its own, so set it up again by hand",
+        "8 joins in the file weren't made (one side stayed on the linked model); the end that came in is open there",
+      ]);
+      expect(plan.report.summary).toBe("Converted 8 plumbing fixtures. Left 18 fittings and 22 pipes as the linked model.");
+    });
+
+    it("once its pipes come in (here through a stand-in rule that takes each pipe's size from the model it was written from), every bend and wye comes back, each wye on its trunk where it was", async () => {
+      const model = (await build(plumbingRiser)).head;
+      const out = exportIfc({ model, project: PROJECT, timeStamp: TIME_STAMP });
+      const wasId = new Map(Object.entries(out.report.globalIds).map(([id, guid]) => [guid, id]));
+      const kernel = KERNEL_IMPORT_RULES.find((r) => r.id === "kernel.run_segment");
+      if (!kernel) throw new Error("fixture: the run segment rule");
+      // The file gives a pipe's diameter only; a pipe here is a nominal size of a material. Until an import rule reads that, this stands in for it.
+      const pipes: ImportRuleDef = {
+        ...kernel,
+        convert(p, ctx) {
+          const was = model.elements[wasId.get(p.sourceId) ?? ""];
+          if (ctx.fields.domain !== "pipe" || was?.kind !== "run_segment") return kernel.convert(p, ctx);
+          const level = ctx.level(p);
+          const groupId = p.groupIds.find((id) => ctx.group(id) !== null);
+          const wasSystem = model.elements[was.systemId];
+          if (!level || !groupId || wasSystem?.kind !== "mep_system") return { ok: false, reason: "fixture: its level or system" };
+          const system = ctx.shared<MepSystem>(`system:${groupId}`, () => ({ id: ctx.idFor(groupId), kind: "mep_system", version: 0, authoredRev: {}, partition: { ...GLOBAL_PARTITION, discipline: ctx.cls.discipline }, name: wasSystem.name, systemKind: wasSystem.systemKind, domain: "pipe", provenance: { ifcGlobalId: groupId, source: ctx.provenance(p).source } }));
+          if (typeof system === "string") return { ok: false, reason: system };
+          const record: RunSegment = { id: ctx.idFor(p.sourceId), version: 0, authoredRev: {}, partition: ctx.partition(level), provenance: ctx.provenance(p), kind: "run_segment", domain: "pipe", systemId: system.id, levelId: level.id, start: was.start, end: was.end, size: was.size, links: {}, branches: [], flow: 0 };
+          return { ok: true, records: [record] };
+        },
+      };
+      const plan = planIfcImport(readIfcSource(out.text, READ), { model: empty(), ...PLAN, rules: KERNEL_IMPORT_RULES.map((r) => (r === kernel ? pipes : r)) });
+      const { twin, twinRef, fittings, segments } = twins(model, out.report.globalIds, plan);
+
+      expect(plan.report.classes.map((c) => [c.classId, c.converted, c.linked])).toEqual([["mep.pipe", 22, []], ["mep.run_fitting", 18, []], ["mep.plumbing_fixture", 8, []]]);
+      // Every join in the file is made, the fixtures' too: nothing to report.
+      expect(plan.report.notes).toEqual([]);
+
+      const wyes = fittings.filter((f) => f.host !== undefined);
+      expect(wyes).toHaveLength(8);
+      expect(new Set(wyes.map((f) => f.fittingType))).toEqual(new Set(["wye"]));
+      for (const f of fittings) {
+        const got = twin(f.id);
+        if (got?.kind !== "run_fitting") throw new Error(`${f.label} did not come back as a fitting`);
+        expect(got.fittingType).toBe(f.fittingType);
+        expect(got.label).toBe(f.label);
+        // A quarter bend on a pitched drain turns a little under 90 degrees; it is still the 90 it was made as.
+        expect(got.angleDeg).toBe(f.angleDeg);
+        // Heights are kept to a tenth of a millimetre on the way in.
+        expect(near(got.position, f.position)).toBeLessThan(0.1);
+        expect(got.host).toEqual(f.host ? { ...f.host, segmentId: twin(f.host.segmentId)?.id } : undefined);
+        expect(got.ports.map((p) => [p.id, p.link])).toEqual(f.ports.map((p) => [p.id, twinRef(p.link)]));
+      }
+      for (const seg of segments) {
+        const got = twin(seg.id);
+        if (got?.kind !== "run_segment") throw new Error(`${seg.id} did not come back`);
+        for (const end of ["start", "end"] as const) {
+          const link = seg.links[end];
+          // A fixture's connector takes its id from its name in the file ("Waste" for the model's "w"), so only what it joins is compared; that each side names the other is checked below.
+          if (link && model.elements[link.elementId]?.kind === "part") expect(got.links[end]?.elementId).toBe(twin(link.elementId)?.id);
+          else expect(got.links[end]).toEqual(twinRef(link));
+        }
+        expect(got.branches).toEqual(seg.branches.map((id) => twin(id)?.id));
+      }
       expectLinksMutual(plan.records);
       for (const size of [undefined, 3]) {
         expectChunksWhole(plan.records, size);
         const landed = landImport(empty(), plan.records, size ? { size } : {});
         expect(landed.dropped).toEqual([]);
         expect(runIssues(landed.model)).toEqual([]);
-        expect(Object.keys(landed.model.elements)).toHaveLength(plan.records.length);
       }
-      expect(model.elements[tap.id]).toBe(tap);
-    }
-
-    it("comes back on that trunk at that distance, from a hand-written connection point in the STEP text", async () => {
-      const { model, tap, trunk, onTrunk } = await withBranch();
-      const out = exportIfc({ model, project: PROJECT, timeStamp: TIME_STAMP });
-      const file = readStep(out.text);
-      const byGuid = (guid: string | undefined) => [...file.entities.values()].find((e) => e.args[0]?.kind === "string" && e.args[0].value === guid);
-      const trunkEntity = byGuid(out.report.globalIds[trunk.id]);
-      const tapEntity = byGuid(out.report.globalIds[tap.id]);
-      const nest = [...file.entities.values()].find((e) => e.type === "IFCRELNESTS" && e.args[4]?.kind === "ref" && e.args[4].id === tapEntity?.id);
-      const ports = nest?.args[5];
-      const tapPort = ports?.kind === "list" && ports.items[0]?.kind === "ref" ? ports.items[0].id : undefined;
-      if (!trunkEntity || !tapEntity || tapPort === undefined) throw new Error("fixture: the trunk, the tap and its port in the file");
-      const n = Math.max(...file.entities.keys());
-      // What the agreed convention adds: a port nested on the trunk segment at the branch point, joined to the fitting's port.
-      const added = [
-        `#${n + 1}=IFCCARTESIANPOINT((${onTrunk.x},${onTrunk.y},${onTrunk.z}));`,
-        `#${n + 2}=IFCAXIS2PLACEMENT3D(#${n + 1},$,$);`,
-        `#${n + 3}=IFCLOCALPLACEMENT($,#${n + 2});`,
-        `#${n + 4}=IFCDISTRIBUTIONPORT('0000000000000000000T01',$,'Branch 1',$,$,#${n + 3},$,.NOTDEFINED.,.DUCT.,$);`,
-        `#${n + 5}=IFCRELNESTS('0000000000000000000T02',$,$,$,#${trunkEntity.id},(#${n + 4}));`,
-        `#${n + 6}=IFCRELCONNECTSPORTS('0000000000000000000T03',$,$,$,#${n + 4},#${tapPort},$);`,
-      ];
-      const at = out.text.lastIndexOf("ENDSEC;");
-      const text = `${out.text.slice(0, at)}${added.join("\n")}\n${out.text.slice(at)}`;
-      const plan = importIfc(text, { model: empty(), ...PLAN, ...READ });
-      expectTapBack(model, tap, trunk, plan, twins(model, out.report.globalIds, plan));
-    });
-
-    it("comes back the same from a source built directly, with the point on the trunk's face instead of its centre line", async () => {
-      const { model, tap, trunk } = await withBranch();
-      const out = exportIfc({ model, project: PROJECT, timeStamp: TIME_STAMP });
-      const read = readIfcSource(out.text, READ);
-      const tapId = out.report.globalIds[tap.id];
-      const tapPort = read.products.find((p) => p.sourceId === tapId)?.ports[0];
-      if (!tapPort?.position) throw new Error("fixture: the tap's port");
-      const source: ImportSource = {
-        ...read,
-        products: read.products.map((p) =>
-          p.sourceId === tapId
-            ? { ...p, ports: p.ports.map((port) => ({ ...port, connectedTo: [...port.connectedTo, "trunk-point"] })) }
-            : p.sourceId === out.report.globalIds[trunk.id]
-              ? { ...p, ports: [...p.ports, { id: "trunk-point", name: null, position: tapPort.position, flow: null, connectedTo: [tapPort.id] }] }
-              : p,
-        ),
-      };
-      const plan = planIfcImport(source, { model: empty(), ...PLAN });
-      expectTapBack(model, tap, trunk, plan, twins(model, out.report.globalIds, plan));
     });
   });
 
@@ -414,7 +549,7 @@ describe("importIfc: run fittings and the joins through them (#59, #66)", () => 
       const { plan } = await planWith((p) => (p.entity === "IfcDuctSegment" && /Supply/.test(p.name ?? "") && (p.geometry.bounds?.max.x ?? 0) - (p.geometry.bounds?.min.x ?? 0) > 1000 ? { ...p, geometry: { ...p.geometry, extrusions: [], unread: "a mesh" } } : p));
       expect(fittingLine(plan)).toEqual({ classId: "mep.run_fitting", label: "Fittings", converted: 1, linked: [{ reason: "something it joins stays on the linked model", count: 1 }] });
       expect(ofKind([...plan.records], "run_fitting")).toHaveLength(1);
-      expect(expectLinksMutual(plan.records)).toBe(4);
+      expect(expectLinksMutual(plan.records)).toBe(8);
       expect(joinNotes(plan)).toContain("1 join in the file wasn't made (one side stayed on the linked model); the end that came in is open there");
       expect(landImport(empty(), plan.records).dropped).toEqual([]);
     });
@@ -423,7 +558,7 @@ describe("importIfc: run fittings and the joins through them (#59, #66)", () => 
       const { plan } = await planWith((p) => (p.entity === "IfcDuctFitting" ? { ...p, ports: p.ports.map((port) => ({ ...port, connectedTo: [] })) } : p));
       expect(fittingLine(plan)?.converted).toBe(0);
       expect(fittingLine(plan)?.linked).toEqual([{ reason: "the file doesn't say what its openings join", count: 2 }]);
-      expect(expectLinksMutual(plan.records)).toBe(0);
+      expect(expectLinksMutual(plan.records)).toBe(4);
     });
 
     it("a fitting written as a transition where its runs turn, or of a kind that isn't read yet, stays linked", async () => {
@@ -431,8 +566,8 @@ describe("importIfc: run fittings and the joins through them (#59, #66)", () => 
       const { plan } = await planWith((p) => (p.entity === "IfcDuctFitting" ? { ...p, predefinedType: kinds.pop() ?? null } : p));
       expect(fittingLine(plan)?.converted).toBe(0);
       expect((fittingLine(plan)?.linked ?? []).map((l) => l.reason).sort()).toEqual(["it is a kind of fitting that isn't read from the file yet", "it is written as a transition, but the runs it joins turn there"]);
-      // Neither left a link on the runs it would have joined.
-      expect(expectLinksMutual(plan.records)).toBe(0);
+      // Neither left a link on the runs it would have joined: only the two onto the unit's openings are there, each on both records.
+      expect(expectLinksMutual(plan.records)).toBe(4);
     });
 
     it("says so when the file joins two straight pieces where they turn, with no fitting between them", async () => {
@@ -449,7 +584,7 @@ describe("importIfc: run fittings and the joins through them (#59, #66)", () => 
       };
       const joined = planIfcImport(rejoined, { model: empty(), ...PLAN });
       expect(ofKind([...joined.records], "run_segment")).toHaveLength(4);
-      expect(expectLinksMutual(joined.records)).toBe(0);
+      expect(expectLinksMutual(joined.records)).toBe(4);
       expect(joinNotes(joined)).toContain("1 join in the file wasn't made (the file joins them where they turn, with no fitting between them); the ends there are open, so join them by hand");
     });
   });

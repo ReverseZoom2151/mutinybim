@@ -976,12 +976,14 @@ own words. Every name is trade-neutral.
   top. Peers advertise `walls:surface_binding`; an older peer is sent the height it works out to.
 - 1.13.0 (Nov 25 2026), additive: import rules read the file's joins. `ImportRuleContext.joinedTo(port)`
   answers what a product's connection point (`ImportPort`) is joined to in the file: each far point
-  with its product (`ImportJoin`). A link is two records naming each other, so a rule writes its own
-  side only; after the rules run, the plan writes each link on both sides and lists in the report the
+  with its product (`ImportJoin`), and, when that product became a part, the id of the part's
+  connector that sits there (`connector`). A link is two records naming each other, so a rule writes
+  its own side only; after the rules run, the plan writes each link on both sides (run to run, run to
+  fitting, and a run's end or a fitting's opening to a part's connector) and lists in the report the
   joins it could not make, each with the reason. The kernel's `kernel.run_fitting` rule (order 20)
-  uses it: a bend, transition or end cap comes in from the straight runs its openings join, and a
-  branch fitting from a connection point on its trunk between the trunk's ends, joined to the
-  fitting. `ImportProduct.generalEntities` (optional) names the more general entities a product also
+  uses it: a bend, transition or end cap comes in from the straight runs and part connectors its
+  openings join, and a branch fitting from a connection point on its trunk between the trunk's ends,
+  joined to the fitting. `ImportProduct.generalEntities` (optional) names the more general entities a product also
   is; a class homed on one of them takes the product when no class with a rule names its own entity,
   so an add-on's class homed on the specific entity wins. A run fitting may carry `provenance`
   (`ifcGlobalId`, `source`). `importChunks` keeps joined records in one chunk, and `withoutDropped`
