@@ -65,7 +65,7 @@ import { GeometryWriter, type Section, type Vec3 } from "./geometry";
 import { derivedIfcGuid, isIfcGuid, isUuid, projectNamespace, relationshipIfcGuid, uuidToIfcGuid } from "./guid";
 import { PROXY, primaryClass, resolveIfcClass, type ResolvedIfcClass } from "./mapping";
 import { ParameterHomes, PropertyBag, baselineParameterHomes, registryParameterHomes, writeSets, type ParameterHome, type PropertyInput } from "./properties";
-import { ownAttributes, predefinedTypes } from "./schema-ifc4x3";
+import { ownAttributes, predefinedTypes, statedEnumMembers, type StatedEnumAttribute } from "./schema-ifc4x3";
 import { $, bool, en, int, list, opt, real, str, serializeStep, StepGraph, type StepRef, type StepValue } from "./step";
 import { UnitSet } from "./units";
 
@@ -186,6 +186,23 @@ function byId<T extends { readonly id: string }>(a: T, b: T): number {
 
 function str255(s: string): StepValue {
   return s === "" ? $ : str(s.length > 255 ? s.slice(0, 255) : s);
+}
+
+/** Where the schema keeps a person's own words when the enumeration has no member for them. */
+const USER_DEFINED_ATTRIBUTE: Readonly<Record<StatedEnumAttribute, string>> = { OperationType: "UserDefinedOperationType", PartitioningType: "UserDefinedPartitioningType" };
+
+/**
+ * A stored door operation or window partitioning as the schema takes it: the
+ * enumeration's own member when it has one (in any casing), else USERDEFINED
+ * with the stored words beside it. Null when nothing is stated (blank, or not
+ * text). Nothing a model stores here can stop the export.
+ */
+function statedEnum(attribute: StatedEnumAttribute, raw: unknown): Readonly<Record<string, StepValue>> | null {
+  if (typeof raw !== "string" || raw.trim() === "") return null;
+  const stated = raw.trim();
+  const member = stated.toUpperCase();
+  if (statedEnumMembers(attribute).has(member)) return { [attribute]: en(member) };
+  return { [attribute]: en("USERDEFINED"), [USER_DEFINED_ATTRIBUTE[attribute]]: str255(stated) };
 }
 
 function stringField(el: BimElement, key: string): string | null {
@@ -474,7 +491,7 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
   const groupMembers = new Map<string, StepRef[]>();
 
   // `userDefined` says what a USERDEFINED type is when it has no `elementType` of its own: what its occurrences say in ObjectType.
-  const writeType = (key: string, entity: string, predefined: string | null, name: string, elementType: string | null, bag: PropertyBag | null, extraEnums: Readonly<Record<string, string>> = {}, userDefined: string | null = null): { ref: StepRef; guid: string; members: StepRef[] } => {
+  const writeType = (key: string, entity: string, predefined: string | null, name: string, elementType: string | null, bag: PropertyBag | null, extra: Readonly<Record<string, StepValue>> = {}, userDefined: string | null = null): { ref: StepRef; guid: string; members: StepRef[] } => {
     const existing = typeObjects.get(key);
     if (existing) return existing;
     const guid = guids.derived(`type:${key}`);
@@ -488,10 +505,11 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     const predefinedType = predefined && members.has(predefined) ? predefined : "NOTDEFINED";
     const tail = own.map((a): StepValue => {
       if (a === "PredefinedType") return en(predefinedType);
-      if (a === "OperationType" || a === "PartitioningType") return en(extraEnums[a] ?? "NOTDEFINED");
+      // Required on the type, so a type that states none says so.
+      if (a === "OperationType" || a === "PartitioningType") return extra[a] ?? en("NOTDEFINED");
       // Required by the schema; the model doesn't say where a thing is put together.
-      if (a === "AssemblyPlace") return en("NOTDEFINED");
-      return $;
+      if (a === "AssemblyPlace") return extra[a] ?? en("NOTDEFINED");
+      return extra[a] ?? $;
     });
     // The schema's rules: a type has a Name, and a USERDEFINED one says what it is in ElementType.
     const typeName = name.trim() === "" ? "Unnamed type" : name;
@@ -503,13 +521,13 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     return entry;
   };
 
-  const writeElement = (el: BimElement, cls: ResolvedIfcClass, name: string | null, tag: string | null, placement: StepRef | null, body: StepRef | null, extra: Readonly<Record<string, number | string>> = {}): Product => {
+  const writeElement = (el: BimElement, cls: ResolvedIfcClass, name: string | null, tag: string | null, placement: StepRef | null, body: StepRef | null, extra: Readonly<Record<string, number | StepValue>> = {}): Product => {
     const guid = guids.record(el);
     const tail = ownAttributes(cls.entity).map((a): StepValue => {
       if (a === "PredefinedType") return cls.predefinedType ? en(cls.predefinedType) : $;
       const v = extra[a];
-      if (typeof v === "string" && v.trim() !== "") return en(v);
-      return typeof v === "number" && v > 0 ? real(v) : $;
+      if (typeof v === "number") return v > 0 ? real(v) : $;
+      return v ?? $;
     });
     const ref = g.add(cls.entity.toUpperCase(), [str(guid), $, opt(name), $, opt(cls.objectType), placement ?? $, body ?? $, opt(tag), ...tail]);
     byEntity[cls.entity] = (byEntity[cls.entity] ?? 0) + 1;
@@ -628,23 +646,18 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
       const depth = line?.widthMm ?? 0;
       const placement = geo.placement(frame, geo.turned({ x: el.position.x, y: el.position.y, z: hostBase + sill }, angle));
       const body = el.width > 0 && el.height > 0 && depth > 0 ? geo.box({ x: -el.width / 2, y: -depth / 2, z: 0 }, { x: el.width / 2, y: depth / 2, z: el.height }) : null;
-      const resolveIfcDoorOp = (): string => {
-        const op = elementTypeValue(els, el, "architecture.door_operation");
-        if (typeof op === "string" && op.trim()) return op.trim().toUpperCase();
+      const resolveIfcDoorOp = (): Readonly<Record<string, StepValue>> => {
+        const stated = statedEnum("OperationType", elementTypeValue(els, el, "architecture.door_operation"));
+        if (stated) return stated;
         const hand = elementTypeValue(els, el, "architecture.door_handing");
-        if (typeof hand === "string") {
-          const h = hand.trim().toUpperCase();
-          if (h === "RH" || h === "RHR") return "SINGLE_SWING_RIGHT";
-          if (h === "LH" || h === "LHR") return "SINGLE_SWING_LEFT";
-        }
-        return "SINGLE_SWING_LEFT";
+        const h = typeof hand === "string" ? hand.trim().toUpperCase() : "";
+        return { OperationType: en(h === "RH" || h === "RHR" ? "SINGLE_SWING_RIGHT" : "SINGLE_SWING_LEFT") };
       };
-      const rawWinPart = el.openingType === "window" ? elementTypeValue(els, el, "architecture.window_partitioning") : undefined;
-      const extraOpening: Record<string, number | string> = {
+      const extraOpening: Record<string, number | StepValue> = {
         OverallWidth: el.width,
         OverallHeight: el.height,
-        ...(el.openingType === "door" ? { OperationType: resolveIfcDoorOp() } : {}),
-        ...(typeof rawWinPart === "string" && rawWinPart.trim() ? { PartitioningType: rawWinPart.trim().toUpperCase() } : {}),
+        ...(el.openingType === "door" ? resolveIfcDoorOp() : {}),
+        ...(el.openingType === "window" ? statedEnum("PartitioningType", elementTypeValue(els, el, "architecture.window_partitioning")) : {}),
       };
       product = writeElement(el, cls, el.mark.trim() || null, el.mark.trim() || null, placement, body, extraOpening);
     } else if (el.kind === "run_segment") {
@@ -770,11 +783,10 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     if (elementType) {
       const tb = new PropertyBag();
       parameterValues(tb, elementType.values ?? {}, "MutinyBIM_Type");
-      const rawOp = elementType.values?.["architecture.door_operation"];
-      const rawPart = elementType.values?.["architecture.window_partitioning"];
-      const extraEnums: Record<string, string> = {
-        ...(typeof rawOp === "string" && rawOp.trim() ? { OperationType: rawOp.trim().toUpperCase() } : {}),
-        ...(typeof rawPart === "string" && rawPart.trim() ? { PartitioningType: rawPart.trim().toUpperCase() } : {}),
+      // A door type has no partitioning attribute and a window type no operation, so the one that doesn't apply is never written.
+      const extraEnums: Record<string, StepValue> = {
+        ...statedEnum("OperationType", elementType.values?.["architecture.door_operation"]),
+        ...statedEnum("PartitioningType", elementType.values?.["architecture.window_partitioning"]),
       };
       writeType(`etype:${elementType.id}|${cls.entity}`, cls.typeEntity ?? "IfcBuildingElementProxyType", cls.predefinedType, elementType.name, null, tb, extraEnums, cls.objectType).members.push(product.ref);
     }
