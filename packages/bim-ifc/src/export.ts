@@ -614,7 +614,6 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
       const angle = line ? (Math.atan2(line.end.y - line.start.y, line.end.x - line.start.x) * 180) / Math.PI : 0;
       const depth = line?.widthMm ?? 0;
       const placement = geo.placement(frame, geo.turned({ x: el.position.x, y: el.position.y, z: hostBase + sill }, angle));
-      const body = el.width > 0 && el.height > 0 && depth > 0 ? geo.box({ x: -el.width / 2, y: -depth / 2, z: 0 }, { x: el.width / 2, y: depth / 2, z: el.height }) : null;
       // The hole it cuts: the void's own width and height, through the host's thickness, measured from this placement.
       if (v && depth > 0) {
         const along = v.profile.map((q) => q.x - el.offset);
@@ -625,6 +624,7 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
       const mark = el.mark.trim() || null;
       const kindWords = el.openingType.replace(/[_\s]+/g, " ").trim();
       const openingName = mark ?? (cls.entity === PROXY && kindWords ? kindWords.charAt(0).toUpperCase() + kindWords.slice(1) : null);
+      const body = el.width > 0 && el.height > 0 && depth > 0 ? geo.box({ x: -el.width / 2, y: -depth / 2, z: 0 }, { x: el.width / 2, y: depth / 2, z: el.height }) : null;
       const resolveIfcDoorOp = (): string => {
         const op = elementTypeValue(els, el, "architecture.door_operation");
         if (typeof op === "string" && op.trim()) return op.trim().toUpperCase();
