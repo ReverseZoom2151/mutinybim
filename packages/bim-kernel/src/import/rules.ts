@@ -789,21 +789,26 @@ function portKind(ctx: ImportRuleContext, p: ImportProduct, port: ImportPort): P
   // The system type the file gives the port; failing that, the systems the file puts the product in.
   let rows = port.systemType ? registry.rows.filter((row) => fits(row) && row.ifc.system === "IfcDistributionSystem" && row.ifc.predefinedType === port.systemType) : [];
   const exact = rows.length > 0;
-  if (!exact) {
+  const fromGroups = (): ServiceRow[] => {
     const found = new Set<ServiceRow>();
     for (const id of p.groupIds) {
       const group = ctx.group(id);
       const row = group ? systemRowOf(group, stated) : null;
       if (row && fits(row)) found.add(row);
     }
-    rows = [...found];
-  }
+    return [...found];
+  };
+  if (!exact) rows = fromGroups();
   const connectors = [...new Set(rows.map((row) => row.connector))];
   const domain = stated ?? (connectors.length === 1 ? (connectors[0] ?? null) : null);
   if (domain === null) return NO_KIND;
   if (!([...BUILTIN_CONNECTOR_IDS, ...registry.connectorIds] as readonly string[]).includes(domain)) return `no add-on here draws that kind of connection ("${domain}")`;
   const [only, ...more] = rows;
-  const picked = only && more.length === 0 ? only : rowNamed(rows, port.name ?? "");
+  let picked = only && more.length === 0 ? only : rowNamed(rows, port.name ?? "");
+  if (!picked && exact && more.length > 0) {
+    const narrowed = fromGroups().filter((row) => rows.includes(row));
+    if (narrowed.length === 1) picked = narrowed[0] ?? null;
+  }
   if (picked) return { domain, systemKind: picked.id };
   // The file's own word fits several kinds: the first is taken, and the report says so. Kinds guessed from a system fit none surely enough to take.
   return exact && only ? { domain, systemKind: only.id, among: rows } : { domain, systemKind: UNKNOWN_SYSTEM_KIND };
@@ -811,6 +816,8 @@ function portKind(ctx: ImportRuleContext, p: ImportProduct, port: ImportPort): P
 
 interface PortsRead {
   readonly connectors: PartConnector[];
+  /** Source port id -> imported connector id on the part type, for resolving co-located ports during join planning. */
+  readonly byPort: ReadonlyMap<string, string>;
   /** Why ports weren't brought in, each with how many. */
   readonly left: ReadonlyMap<string, number>;
   /** How many face out of the nearest side of the box, the file not saying which way they face. */
@@ -860,6 +867,7 @@ function partConnectors(ctx: ImportRuleContext, p: ImportProduct, seat: PartSeat
   });
 
   const connectors: PartConnector[] = [];
+  const byPort = new Map<string, string>();
   const unsure = new Map<string, { kinds: string[]; labels: string[] }>();
   let facedBySide = 0;
   for (const { port, kind, at } of read) {
@@ -894,6 +902,7 @@ function partConnectors(ctx: ImportRuleContext, p: ImportProduct, seat: PartSeat
       continue;
     }
     connectors.push(made.data);
+    byPort.set(port.id, made.data.id);
     if (!stated) facedBySide += 1;
     if (kind.among) {
       const kinds = kind.among.map((row) => row.label.toLowerCase());
@@ -908,7 +917,28 @@ function partConnectors(ctx: ImportRuleContext, p: ImportProduct, seat: PartSeat
     const which = named.length === 1 ? named.join("") : `${named.slice(0, -1).join(", ")} and ${named[named.length - 1]}`;
     return `the file doesn't say whether ${which} ${one ? "carries" : "carry"} ${kinds.slice(0, -1).join(", ")} or ${kinds[kinds.length - 1]}, so ${one ? "it was" : "they were"} brought in as ${kinds[0]}; change ${one ? "it" : "them"} on the type if that is wrong`;
   });
-  return { connectors, left, facedBySide, unsure: notes };
+  return { connectors, byPort, left, facedBySide, unsure: notes };
+}
+
+/** Per-plan map of source product id -> (source port id -> imported connector id), keyed on the plan's `joinedTo` closure. */
+const partPortMaps = new WeakMap<object, Map<string, ReadonlyMap<string, string>>>();
+
+function rememberPartPorts(scope: object, productSourceId: string, byPort: ReadonlyMap<string, string>): void {
+  let perProduct = partPortMaps.get(scope);
+  if (!perProduct) {
+    perProduct = new Map();
+    partPortMaps.set(scope, perProduct);
+  }
+  perProduct.set(productSourceId, byPort);
+}
+
+/**
+ * Look up the connector id built by `kernel.part` for a source port in the current plan.
+ * Returns `undefined` when the part was converted by another rule (caller falls back to position matching).
+ */
+export function importedPartPortId(scope: object, productSourceId: string, portId: string): string | null | undefined {
+  const byPort = partPortMaps.get(scope)?.get(productSourceId);
+  return byPort ? (byPort.get(portId) ?? null) : undefined;
 }
 
 /** Connector names a note about what they carry spells out before "and N more". */
@@ -994,6 +1024,7 @@ const part: ImportRuleDef = {
     if (typeof type === "string") return fail(type);
     if (seat.why) ctx.note(`${typeName}: ${seat.why}`);
     for (const note of portNotes(p.ports.length, ports)) ctx.note(`${typeName}: ${note}`);
+    rememberPartPorts(ctx.joinedTo, p.sourceId, ports.byPort);
     const record: PartInstance = {
       ...base(ctx, p, level),
       kind: "part",

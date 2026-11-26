@@ -587,5 +587,56 @@ describe("importIfc: run fittings and the joins through them (#59, #66)", () => 
       expect(expectLinksMutual(joined.records)).toBe(4);
       expect(joinNotes(joined)).toContain("1 join in the file wasn't made (the file joins them where they turn, with no fitting between them); the ends there are open, so join them by hand");
     });
+
+    it("disambiguates an AIRCONDITIONING port with a generic name using the product's system group so return-air joins land", async () => {
+      const model = (await build(rooftopUnit)).head;
+      const source = readIfcSource(exportIfc({ model, project: PROJECT, timeStamp: TIME_STAMP }).text, READ);
+      const returnGroup = source.groups.find((g) => /return/i.test(g.name ?? ""));
+      if (!returnGroup) throw new Error("fixture: return-air group");
+      const modified: ImportSource = {
+        ...source,
+        products: source.products.map((p) => {
+          if (p.entity !== "IfcUnitaryEquipment") return p;
+          return {
+            ...p,
+            groupIds: [returnGroup.sourceId],
+            ports: p.ports.map((port) => (/return/i.test(port.name ?? "") ? { ...port, name: "Neck", systemType: "AIRCONDITIONING" } : port)),
+          };
+        }),
+      };
+      const plan = planIfcImport(modified, { model: empty(), ...PLAN });
+      const partTypes = ofKind([...plan.records], "part_type");
+      const neck = partTypes.flatMap((t) => t.definition.connectors).find((c) => c.label === "Neck");
+      expect(neck?.systemKind).toBe("return_air");
+      expect(joinNotes(plan)).toEqual([]);
+      expect(expectLinksMutual(plan.records)).toBe(12);
+    });
+
+    it("joins both runs when a part has two distinct IFC ports at the exact same coordinates", () => {
+      const t = IfcText.start();
+      t.storey("Level 1", 0);
+      const unit = t.product("Level 1", "IFCUNITARYEQUIPMENT", "AHU-1", [0, 0, 2500], t.body([t.extrude(t.rect(1000, 1000), 1000)]), ".AIRHANDLER.");
+      const duct = (name: string, at: readonly [number, number, number], length: number) =>
+        t.product("Level 1", "IFCDUCTSEGMENT", name, at, t.body([t.extrude(t.rect(400, 300), length, t.axis3([0, 0, 0], [1, 0, 0], [0, 1, 0]))]), ".RIGIDSEGMENT.");
+      const supplyDuct = duct("Supply 1", [0, 0, 3000], 3000);
+      const returnDuct = duct("Return 1", [-3000, 0, 3000], 3000);
+      t.assign(t.system("Supply Air 1", "AIRCONDITIONING"), [supplyDuct]);
+      t.assign(t.system("Return Air 1", "AIRCONDITIONING"), [returnDuct]);
+      const sharedAt = [0, 0, 3000] as const;
+      const port = (owner: number, name: string, dir: readonly [number, number, number]) => {
+        const id = t.add("IFCDISTRIBUTIONPORT", `${t.guid()},$,'${name}',$,$,#${t.place(null, t.axis3(sharedAt, dir, [0, 1, 0]))},$,.NOTDEFINED.,.DUCT.,.AIRCONDITIONING.`);
+        t.add("IFCRELNESTS", `${t.guid()},$,$,$,#${owner},(#${id})`);
+        return id;
+      };
+      const join = (x: number, y: number) => t.add("IFCRELCONNECTSPORTS", `${t.guid()},$,$,$,#${x},#${y},$`);
+      join(port(unit, "Supply", [1, 0, 0]), port(supplyDuct, "Start", [-1, 0, 0]));
+      join(port(unit, "Return", [-1, 0, 0]), port(returnDuct, "End", [1, 0, 0]));
+
+      const plan = importIfc(t.text(), { model: hostModel(), referenceId: "ref", sourceKey: "colocated", sourceId: "colocated", label: "Other tool", disciplines: ["mechanical"] });
+      expect(joinNotes(plan)).toEqual([]);
+      expect(expectLinksMutual(plan.records)).toBe(4);
+      const [part] = ofKind([...plan.records], "part");
+      expect(Object.keys(part?.links ?? {}).sort()).toEqual(["return", "supply"]);
+    });
   });
 });

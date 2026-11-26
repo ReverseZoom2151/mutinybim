@@ -6,7 +6,7 @@ import type { BimElement, ElementId, Level, ModelState, ParamValue } from "../ty
 import { IFC_IMPORT_RULE_POINT, type ImportRuleContext, type ImportRuleDef } from "./rule-point";
 import { reverseClassMap } from "./reverse-map";
 import { joinRuns, partConnectorAt } from "./joins";
-import { importElementId } from "./rules";
+import { importElementId, importedPartPortId } from "./rules";
 import type { IfcImportPlan, IfcImportReport, ImportClassLine, ImportGroup, ImportJoin, ImportPort, ImportProduct, ImportSource } from "./types";
 
 /**
@@ -150,9 +150,11 @@ function planInScope(source: ImportSource, opts: PlanImportOptions): IfcImportPl
     return port.connectedTo.flatMap((id) => {
       const far = owners.get(id);
       if (!far) return [];
-      // A part's connectors have ids of their own: say which one this point is, by where it sits.
+      // A part's connectors have ids of their own: match by source port id first (handles co-located ports), falling back to position for add-on part rules.
       const record = convertedRecord(far.product.sourceId);
       if (record?.kind !== "part") return [far];
+      const known = importedPartPortId(joinedTo, far.product.sourceId, far.port.id);
+      if (known !== undefined) return [{ ...far, connector: known }];
       const type = planned(record.typeId);
       const level = planned(record.levelId);
       const at = far.port.position;
