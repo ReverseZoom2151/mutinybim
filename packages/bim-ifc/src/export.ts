@@ -356,23 +356,12 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
   const guids = new Guids(ns, warn);
   const g = new StepGraph();
   const units = new UnitSet();
-  let index: ReturnType<typeof buildClassIndex>;
-  try {
-    index = buildClassIndex(registry, model);
-  } catch (err) {
-    // The kernel's class pass reads every part's type, so one stored part type with no definition stops it for the
-    // whole model. Classes are then read without those part types; their parts say why they are left out below.
-    const sound: Record<string, BimElement> = {};
-    const broken: string[] = [];
-    for (const el of Object.values(model.elements)) {
-      const definition: unknown = el.kind === "part_type" ? el.definition : undefined;
-      if (el.kind === "part_type" && (typeof definition !== "object" || definition === null)) broken.push(el.id);
-      else sound[el.id] = el;
+  const index = buildClassIndex(registry, model);
+  for (const el of Object.values(model.elements).sort(byId)) {
+    const definition: unknown = el.kind === "part_type" ? el.definition : undefined;
+    if (el.kind === "part_type" && (typeof definition !== "object" || definition === null)) {
+      warn(`${el.id}: this part type has no definition stored, so parts of this type can't be written. Load the part type again, then export again.`);
     }
-    if (broken.length === 0) throw err;
-    console.error("[bim-ifc] the class index could not be built with every part type; built without the part types that have no definition", { partTypeIds: broken.slice(0, 10), err });
-    index = buildClassIndex(registry, { elements: sound });
-    for (const id of broken.sort()) warn(`${id}: this part type has no definition stored, so parts of this type can't be written. Load the part type again, then export again.`);
   }
   const org = organizationOf(model);
   const lastPhase = Math.max(0, org.phases.length - 1);
@@ -477,7 +466,9 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
   // ---------------------------------------------------------------- storeys
   const levels = elements.filter((e): e is Level => e.kind === "level").sort((a, b) => a.elevationMm - b.elevationMm || byId(a, b));
   const storeys = new Map<string, { readonly ref: StepRef; readonly guid: string; readonly placement: StepRef }>();
+  const levelElevations = new Map<string, number>();
   const levelByName = new Map<string, string>();
+  const allLevelByName = new Map<string, string>();
   const writeStorey = (lv: Level): void => {
     const guid = guids.record(lv);
     const placement = geo.placement(buildingPlacement, geo.axis({ x: 0, y: 0, z: lv.elevationMm }));
@@ -486,8 +477,13 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     if (!levelByName.has(lv.name)) levelByName.set(lv.name, lv.id);
     counts.storeys++;
   };
-  // What stood on a level that is left out is written in the building instead.
-  for (const lv of levels) guarded(lv, writeStorey);
+  // What stood on a level that is left out is written in the building instead,
+  // keeping its floor elevation whenever that level still had a finite elevationMm.
+  for (const lv of levels) {
+    if (typeof lv.elevationMm === "number" && Number.isFinite(lv.elevationMm)) levelElevations.set(lv.id, lv.elevationMm);
+    if (typeof lv.name === "string" && !allLevelByName.has(lv.name)) allLevelByName.set(lv.name, lv.id);
+    guarded(lv, writeStorey);
+  }
   aggregate(buildingRef, buildingGuid, levels.map((l) => storeys.get(l.id)?.ref).filter((r): r is StepRef => !!r));
 
   const levelOf = (el: BimElement): string | null => {
@@ -498,7 +494,26 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     if (named) return storeys.has(named) ? named : (levelByName.get(named) ?? null);
     return null;
   };
-  const frameOf = (levelId: string | null): StepRef => (levelId ? (storeys.get(levelId)?.placement ?? buildingPlacement) : buildingPlacement);
+  const placementLevelOf = (el: BimElement): string | null => {
+    const hasFrame = (id: string) => storeys.has(id) || levelElevations.has(id);
+    if (el.kind === "part" && el.planned) return el.planned.levelHint && hasFrame(el.planned.levelHint) ? el.planned.levelHint : null;
+    const direct = stringField(el, "levelId");
+    if (direct && hasFrame(direct)) return direct;
+    const named = el.partition?.level;
+    if (named) {
+      if (hasFrame(named)) return named;
+      const byName = levelByName.get(named) ?? allLevelByName.get(named);
+      return byName && hasFrame(byName) ? byName : null;
+    }
+    return null;
+  };
+  const frameOf = (levelId: string | null): StepRef => {
+    if (!levelId) return buildingPlacement;
+    const storey = storeys.get(levelId);
+    if (storey) return storey.placement;
+    const elevation = levelElevations.get(levelId);
+    return elevation !== undefined ? geo.placement(buildingPlacement, geo.axis({ x: 0, y: 0, z: elevation })) : buildingPlacement;
+  };
 
   const parameterValues = (bag: PropertyBag, values: Readonly<Record<string, ParamValue>>, fallbackSet?: string) => {
     for (const [key, value] of Object.entries(values).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
@@ -551,7 +566,7 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
   const writeRoom = (room: Extract<BimElement, { readonly kind: "room" }>): void => {
     const guid = guids.record(room);
     const levelId = levelOf(room);
-    const placement = geo.placement(frameOf(levelId), geo.axis({ x: 0, y: 0, z: 0 }));
+    const placement = geo.placement(frameOf(placementLevelOf(room)), geo.axis({ x: 0, y: 0, z: 0 }));
     const cls = resolveIfcClass(registry, index, room);
     const pt = cls.entity === "IfcSpace" && cls.predefinedType && predefinedTypes("IfcSpace").has(cls.predefinedType) ? cls.predefinedType : "INTERNAL";
     const ref = g.add("IFCSPACE", [str(guid), $, str255(room.number), $, $, placement, $, str255(room.name), en("ELEMENT"), en(pt), $]);
@@ -569,7 +584,7 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
   const writeSpace = (sp: Space): void => {
     const guid = guids.record(sp);
     const levelId = sp.levelId && storeys.has(sp.levelId) ? sp.levelId : null;
-    const placement = geo.placement(frameOf(levelId), geo.axis({ x: 0, y: 0, z: 0 }));
+    const placement = geo.placement(frameOf(sp.levelId ?? null), geo.axis({ x: 0, y: 0, z: 0 }));
     const outlines = spaceOutlines(els, sp);
     const height = sp.ceilingHeightMm ?? null;
     const body = outlines.length === 1 && outlines[0] && height ? geo.prism(outlines[0], 0, height) : null;
@@ -693,7 +708,7 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     // A separation line bounds rooms and is never built.
     const cls: ResolvedIfcClass = el.kind === "space_separator" ? { ...resolved, entity: "IfcVirtualElement", predefinedType: "BOUNDARY", note: null } : resolved;
     const levelId = levelOf(el);
-    const frame = frameOf(levelId);
+    const frame = frameOf(placementLevelOf(el));
     const bag = new PropertyBag();
     let product: Product;
     let spaceHint: string | null = null;
@@ -1158,7 +1173,7 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     } else if (el.kind === "run_fitting") {
       const sk = systemKindOf(el.systemId);
       for (const port of [...el.ports].sort(byId)) {
-        writePort(el.id, port.id, port.id, undefined, el.domain, sk, host.placement ? geo.placement(frameOf(levelOf(el)), geo.axis(port.position)) : null);
+        writePort(el.id, port.id, port.id, undefined, el.domain, sk, host.placement ? geo.placement(frameOf(placementLevelOf(el)), geo.axis(port.position)) : null);
         if (port.link) connections.push([`${el.id}|${port.id}`, `${port.link.elementId}|${port.link.port}`]);
       }
     }
@@ -1256,7 +1271,7 @@ export function exportIfc(opts: IfcExportOptions): IfcExportResult {
     let body: StepRef | null = null;
     if (bounds.kind === "outline") {
       levelId = storeys.has(bounds.levelId) ? bounds.levelId : null;
-      placement = geo.placement(frameOf(levelId), geo.axis({ x: 0, y: 0, z: 0 }));
+      placement = geo.placement(frameOf(bounds.levelId), geo.axis({ x: 0, y: 0, z: 0 }));
       const bottom = bounds.bottom ?? 0;
       if (bounds.top !== undefined) body = geo.prism(bounds.outline, bottom, bounds.top - bottom);
     } else if (bounds.kind === "derived") {

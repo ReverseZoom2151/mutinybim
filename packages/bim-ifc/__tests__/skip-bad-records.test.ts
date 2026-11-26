@@ -153,6 +153,38 @@ describe("exportIfc: a stored record that can't be written", () => {
     expect(danglingReferences(readStep(out.text))).toEqual([]);
   });
 
+  it("keeps the floor elevation for elements on a skipped upper level whose elevationMm is still finite", () => {
+    const m = new Log(building());
+    m.ok({ type: "create_ceiling", ceilings: [{ ceilingId: "clg-l2", levelId: "lvl-2", outline: square(20000, 30000, 4000), heightMm: 2700 }] });
+    const out = run(stored(m.head, { "lvl-2": { name: null } }));
+
+    expect(leftOut(out, "lvl-2")).toHaveLength(1);
+    expect(out.report.counts.storeys).toBe(1);
+    expect(inFile(out, "clg-l2")).toBe(true);
+    expect(inFile(out, "sp-201")).toBe(true);
+    expect(danglingReferences(readStep(out.text))).toEqual([]);
+
+    const step = readStep(out.text);
+    const byId = step.entities;
+    const worldZ = (placementRef: number): number => {
+      const lp = byId.get(placementRef);
+      if (!lp || lp.type !== "IFCLOCALPLACEMENT") return 0;
+      const parent = lp.args[0]?.kind === "ref" ? worldZ(lp.args[0].id) : 0;
+      const axis = lp.args[1]?.kind === "ref" ? byId.get(lp.args[1].id) : undefined;
+      const pt = axis?.args[0]?.kind === "ref" ? byId.get(axis.args[0].id) : undefined;
+      const coords = pt?.args[0]?.kind === "list" ? pt.args[0].items : [];
+      const z = coords[2]?.kind === "number" ? coords[2].value : 0;
+      return parent + z;
+    };
+    const allEntities = [...byId.values()];
+    const ceilingEntity = allEntities.find((e) => e.type === "IFCCOVERING" && e.args[0]?.kind === "string" && e.args[0].value === out.report.globalIds["clg-l2"]);
+    const spaceEntity = allEntities.find((e) => e.type === "IFCSPACE" && e.args[0]?.kind === "string" && e.args[0].value === out.report.globalIds["sp-201"]);
+    expect(ceilingEntity?.args[5]?.kind).toBe("ref");
+    expect(spaceEntity?.args[5]?.kind).toBe("ref");
+    if (ceilingEntity?.args[5]?.kind === "ref") expect(worldZ(ceilingEntity.args[5].id)).toBeCloseTo(4000, 3);
+    if (spaceEntity?.args[5]?.kind === "ref") expect(worldZ(spaceEntity.args[5].id)).toBeCloseTo(4000, 3);
+  });
+
   it("leaves the whole grid out when the only lines one way can't be written, so the file has no grid with axes one way only", () => {
     const model = building();
     const out = run(stored(model, { "grid-a": { end: null }, "grid-b": { start: { x: Number.NaN, y: 0 } } }));
