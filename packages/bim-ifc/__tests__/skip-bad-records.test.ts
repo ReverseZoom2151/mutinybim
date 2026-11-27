@@ -185,16 +185,19 @@ describe("exportIfc: a stored record that can't be written", () => {
     if (spaceEntity?.args[5]?.kind === "ref") expect(worldZ(spaceEntity.args[5].id)).toBeCloseTo(4000, 3);
   });
 
-  it("leaves the whole grid out when the only lines one way can't be written, so the file has no grid with axes one way only", () => {
+  it("keeps the surviving one-way grid line as an IfcAnnotation when the only lines the other way can't be written, with no invalid IfcGrid", () => {
     const model = building();
     const out = run(stored(model, { "grid-a": { end: null }, "grid-b": { start: { x: Number.NaN, y: 0 } } }));
 
     expect(leftOut(out, "grid-a")).toHaveLength(1);
     expect(leftOut(out, "grid-b")).toHaveLength(1);
-    expect(out.report.warnings.filter((w) => w.includes("no line left in the other direction"))).toHaveLength(1);
-    expect(entityCounts(readStep(out.text)).IFCGRID).toBeUndefined();
-    expect(entityCounts(readStep(out.text)).IFCGRIDAXIS).toBeUndefined();
+    expect(out.report.warnings.filter((w) => w.includes("IfcAnnotation"))).toHaveLength(1);
+    const counts = entityCounts(readStep(out.text));
+    expect(counts.IFCGRID).toBeUndefined();
+    expect(counts.IFCGRIDAXIS).toBeUndefined();
+    expect(counts.IFCANNOTATION).toBe(1);
     expect(out.report.byEntity.IfcGrid).toBeUndefined();
+    expect(out.report.byEntity.IfcAnnotation).toBe(1);
     expect(inFile(out, "wall-1")).toBe(true);
     expect(danglingReferences(readStep(out.text))).toEqual([]);
   });
